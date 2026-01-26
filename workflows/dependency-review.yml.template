@@ -1,0 +1,92 @@
+# Dependency Review Workflow
+# This workflow checks for vulnerable or unwanted dependencies in pull requests.
+# It prevents merging PRs that introduce known vulnerabilities.
+
+name: Dependency Review
+
+on:
+  pull_request:
+    branches: [main, master]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  dependency-review:
+    name: Review Dependencies
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+
+      - name: Dependency Review
+        uses: actions/dependency-review-action@9129d7d40b8c12c1ed0f60f5c3e9d0b76d9f7e1b # v4.1.3
+        with:
+          # Fail on vulnerabilities with these severities
+          fail-on-severity: moderate
+
+          # Deny these licenses (optional)
+          # deny-licenses: GPL-3.0, AGPL-3.0
+
+          # Allow these licenses (optional, use instead of deny)
+          # allow-licenses: MIT, Apache-2.0, BSD-3-Clause
+
+          # Fail if any vulnerabilities are found (stricter)
+          # fail-on-scopes: runtime, development
+
+          # Allow specific packages with vulnerabilities (use sparingly)
+          # allow-ghsas: GHSA-xxxx-xxxx-xxxx
+
+          # Comment on PR with results
+          comment-summary-in-pr: always
+
+  # Optional: Run OSV-Scanner for additional coverage
+  osv-scan:
+    name: OSV Scanner
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+
+      - name: Run OSV-Scanner
+        uses: google/osv-scanner-action@v1
+        with:
+          scan-args: |-
+            --recursive
+            .
+
+  # Optional: Run npm/pip/cargo audit for language-specific checks
+  # Uncomment the relevant sections for your project
+
+  # npm-audit:
+  #   name: npm Audit
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - uses: actions/setup-node@v4
+  #       with:
+  #         node-version: '20'
+  #     - run: npm ci
+  #     - run: npm audit --audit-level=moderate
+
+  # pip-audit:
+  #   name: pip Audit
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - uses: actions/setup-python@v5
+  #       with:
+  #         python-version: '3.11'
+  #     - run: pip install pip-audit
+  #     - run: pip-audit -r requirements.txt
+
+  # cargo-audit:
+  #   name: cargo Audit
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - run: cargo install cargo-audit
+  #     - run: cargo audit

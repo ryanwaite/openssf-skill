@@ -1,0 +1,17 @@
+# Python-generated files (for assess-project.py)
+__pycache__/
+*.py[oc]
+
+# Editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Local Claude configuration
+.claude/

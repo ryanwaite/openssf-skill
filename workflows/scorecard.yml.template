@@ -1,0 +1,62 @@
+# OpenSSF Scorecard Workflow
+# This workflow runs OpenSSF Scorecard to assess your project's security posture.
+# Results are published to the Security tab and can be viewed at https://scorecard.dev
+
+name: OpenSSF Scorecard
+
+on:
+  # Run on pushes to main branch
+  push:
+    branches: [main, master]
+
+  # Run weekly to catch changes in dependencies and security practices
+  schedule:
+    - cron: '0 6 * * 1'  # Every Monday at 6 AM UTC
+
+  # Allow manual triggering
+  workflow_dispatch:
+
+# Declare default permissions as read only
+permissions: read-all
+
+jobs:
+  analysis:
+    name: Scorecard Analysis
+    runs-on: ubuntu-latest
+
+    permissions:
+      # Required for uploading SARIF results
+      security-events: write
+      # Required for publishing results
+      id-token: write
+      # Required for reading repo contents
+      contents: read
+      # Required for accessing workflow artifacts
+      actions: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+        with:
+          persist-credentials: false
+
+      - name: Run Scorecard
+        uses: ossf/scorecard-action@62b2cac7ed8198b15735ed49ab1e5cf35480ba46 # v2.4.0
+        with:
+          results_file: results.sarif
+          results_format: sarif
+          # Publish results to OpenSSF REST API for badge generation
+          publish_results: true
+
+      - name: Upload SARIF results to Security tab
+        uses: github/codeql-action/upload-sarif@1b1aada464948af03b950897e5eb522f92603cc2 # v3.24.9
+        with:
+          sarif_file: results.sarif
+
+      # Optional: Upload results as artifact for debugging
+      - name: Upload Scorecard results
+        uses: actions/upload-artifact@5d5d22a31266ced268874388b861e4b58bb5c2f3 # v4.3.1
+        with:
+          name: scorecard-results
+          path: results.sarif
+          retention-days: 5

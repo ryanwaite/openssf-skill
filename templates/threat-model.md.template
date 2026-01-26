@@ -1,0 +1,340 @@
+# Threat Model: [System/Feature Name]
+
+## Document Information
+
+| Field | Value |
+|-------|-------|
+| **Version** | 1.0 |
+| **Date** | YYYY-MM-DD |
+| **Author(s)** | [Names] |
+| **Reviewers** | [Names] |
+| **Status** | Draft / In Review / Approved |
+| **Next Review** | YYYY-MM-DD |
+
+---
+
+## 1. Overview
+
+### 1.1 Purpose
+
+[Brief description of the system/feature being modeled and why this threat model exists]
+
+### 1.2 Scope
+
+**In Scope:**
+- [Component/feature 1]
+- [Component/feature 2]
+
+**Out of Scope:**
+- [Explicitly excluded items]
+- [Third-party dependencies - report to their maintainers]
+
+### 1.3 Assumptions
+
+- [Assumption 1 - e.g., "TLS is correctly implemented for all connections"]
+- [Assumption 2 - e.g., "The underlying infrastructure is secure"]
+
+---
+
+## 2. System Description
+
+### 2.1 High-Level Architecture
+
+[Describe the system at a high level. Include a diagram if possible.]
+
+```
+[ASCII diagram or reference to external diagram]
+
+Example:
+┌──────────┐     HTTPS     ┌──────────┐     SQL      ┌──────────┐
+│  Client  │ ────────────► │   API    │ ───────────► │ Database │
+└──────────┘               └──────────┘              └──────────┘
+                                │
+                                │ gRPC
+                                ▼
+                          ┌──────────┐
+                          │ Service  │
+                          └──────────┘
+```
+
+### 2.2 Components
+
+| Component | Description | Technology | Data Handled |
+|-----------|-------------|------------|--------------|
+| [Component 1] | [What it does] | [Tech stack] | [Type of data] |
+| [Component 2] | [What it does] | [Tech stack] | [Type of data] |
+
+### 2.3 Data Classification
+
+| Data Type | Classification | Examples |
+|-----------|---------------|----------|
+| Public | Low | Marketing content |
+| Internal | Medium | User preferences |
+| Confidential | High | PII, credentials |
+| Restricted | Critical | Payment data, health records |
+
+### 2.4 Trust Boundaries
+
+| Boundary | Description | Controls |
+|----------|-------------|----------|
+| [Boundary 1] | [e.g., Internet to DMZ] | [Firewall, WAF] |
+| [Boundary 2] | [e.g., DMZ to Internal] | [Authentication, authorization] |
+
+---
+
+## 3. Data Flow Diagram
+
+[Include or reference a data flow diagram showing:]
+- External entities (users, external systems)
+- Processes (application components)
+- Data stores (databases, files, caches)
+- Data flows (arrows showing data movement)
+- Trust boundaries (dashed lines)
+
+```
+[DFD Diagram]
+```
+
+---
+
+## 4. Assets
+
+### 4.1 Data Assets
+
+| Asset ID | Asset | Sensitivity | Owner | Location |
+|----------|-------|-------------|-------|----------|
+| A-001 | User credentials | Critical | Security Team | Auth database |
+| A-002 | User PII | High | Data Team | User database |
+| A-003 | Session tokens | High | Security Team | Redis cache |
+
+### 4.2 System Assets
+
+| Asset ID | Asset | Criticality | Owner |
+|----------|-------|-------------|-------|
+| S-001 | API servers | Critical | Platform Team |
+| S-002 | Database cluster | Critical | Data Team |
+
+---
+
+## 5. STRIDE Analysis
+
+### 5.1 Spoofing Threats
+
+| ID | Threat | Component | Impact | Likelihood | Risk | Status |
+|----|--------|-----------|--------|------------|------|--------|
+| S-001 | Credential stuffing attack | Auth API | High | Medium | High | Mitigated |
+| S-002 | Session token theft | Web App | High | Low | Medium | Open |
+
+#### S-001: Credential Stuffing Attack
+
+**Description**: Attackers use leaked credentials from other breaches to attempt login.
+
+**Attack Vector**: Automated login attempts using credential lists.
+
+**Impact**: Account takeover, data breach.
+
+**Existing Controls**:
+- Rate limiting on login endpoint
+- Account lockout after 5 failed attempts
+
+**Recommended Mitigations**:
+- [ ] Implement CAPTCHA after 3 failed attempts
+- [ ] Add breached password detection
+- [ ] Require MFA for all accounts
+
+---
+
+### 5.2 Tampering Threats
+
+| ID | Threat | Component | Impact | Likelihood | Risk | Status |
+|----|--------|-----------|--------|------------|------|--------|
+| T-001 | SQL injection | API endpoints | Critical | Medium | Critical | Mitigated |
+| T-002 | Request parameter tampering | Order processing | High | Medium | High | Open |
+
+#### T-001: SQL Injection
+
+**Description**: Attacker injects malicious SQL through input fields.
+
+**Attack Vector**: Unsanitized user input in database queries.
+
+**Impact**: Data breach, data modification, potential RCE.
+
+**Existing Controls**:
+- Parameterized queries used throughout
+- Input validation layer
+
+**Recommended Mitigations**:
+- [x] Use ORM with parameterized queries
+- [x] Input validation on all endpoints
+- [ ] Add WAF rules for SQL injection patterns
+
+---
+
+### 5.3 Repudiation Threats
+
+| ID | Threat | Component | Impact | Likelihood | Risk | Status |
+|----|--------|-----------|--------|------------|------|--------|
+| R-001 | User denies making transaction | Payment system | Medium | Low | Low | Mitigated |
+| R-002 | Admin actions not logged | Admin panel | High | Medium | High | Open |
+
+#### R-002: Admin Actions Not Logged
+
+**Description**: Administrative actions are not properly logged, preventing audit.
+
+**Attack Vector**: Malicious insider performs unauthorized changes.
+
+**Impact**: Cannot prove or disprove malicious actions.
+
+**Existing Controls**:
+- Basic access logs
+
+**Recommended Mitigations**:
+- [ ] Implement comprehensive audit logging
+- [ ] Log all admin actions with user identity
+- [ ] Store logs in tamper-evident system
+
+---
+
+### 5.4 Information Disclosure Threats
+
+| ID | Threat | Component | Impact | Likelihood | Risk | Status |
+|----|--------|-----------|--------|------------|------|--------|
+| I-001 | Sensitive data in error messages | All APIs | Medium | High | High | Open |
+| I-002 | PII exposed in logs | Logging system | High | Medium | High | Open |
+
+#### I-001: Sensitive Data in Error Messages
+
+**Description**: Stack traces and internal details exposed in API error responses.
+
+**Attack Vector**: Trigger errors to gather system information.
+
+**Impact**: Information useful for further attacks.
+
+**Existing Controls**:
+- None
+
+**Recommended Mitigations**:
+- [ ] Implement generic error responses for production
+- [ ] Log detailed errors server-side only
+- [ ] Review error handling in all endpoints
+
+---
+
+### 5.5 Denial of Service Threats
+
+| ID | Threat | Component | Impact | Likelihood | Risk | Status |
+|----|--------|-----------|--------|------------|------|--------|
+| D-001 | API rate limit bypass | Public API | High | Medium | High | Open |
+| D-002 | ReDoS in input validation | User input parsing | Medium | Low | Low | Open |
+
+#### D-001: API Rate Limit Bypass
+
+**Description**: Attacker bypasses rate limiting to overwhelm the API.
+
+**Attack Vector**: Distributed requests, header manipulation.
+
+**Impact**: Service unavailability for legitimate users.
+
+**Existing Controls**:
+- Basic IP-based rate limiting
+
+**Recommended Mitigations**:
+- [ ] Implement user-based rate limiting
+- [ ] Add API key quotas
+- [ ] Deploy CDN with DDoS protection
+
+---
+
+### 5.6 Elevation of Privilege Threats
+
+| ID | Threat | Component | Impact | Likelihood | Risk | Status |
+|----|--------|-----------|--------|------------|------|--------|
+| E-001 | IDOR - access other users' data | User API | Critical | Medium | Critical | Open |
+| E-002 | Missing function-level auth | Admin endpoints | Critical | Low | High | Mitigated |
+
+#### E-001: Insecure Direct Object Reference (IDOR)
+
+**Description**: Users can access other users' resources by manipulating IDs.
+
+**Attack Vector**: Change user_id in API request to access other accounts.
+
+**Impact**: Unauthorized data access, privacy violation.
+
+**Existing Controls**:
+- Authentication required
+
+**Recommended Mitigations**:
+- [ ] Implement ownership checks on all resource access
+- [ ] Use indirect references (UUIDs instead of sequential IDs)
+- [ ] Add authorization testing to CI/CD
+
+---
+
+## 6. Risk Summary
+
+### 6.1 Risk Matrix
+
+| Risk Level | Count | Threats |
+|------------|-------|---------|
+| Critical | 2 | T-001, E-001 |
+| High | 4 | S-001, T-002, I-001, D-001 |
+| Medium | 2 | S-002, I-002 |
+| Low | 2 | R-001, D-002 |
+
+### 6.2 Top Risks
+
+1. **E-001 - IDOR**: Immediate action required
+2. **T-001 - SQL Injection**: Verify mitigations are complete
+3. **I-001 - Error Information Disclosure**: High likelihood, quick fix
+
+---
+
+## 7. Mitigation Roadmap
+
+### Immediate (Sprint 1)
+
+| ID | Mitigation | Owner | Status |
+|----|------------|-------|--------|
+| E-001 | Add ownership checks to all endpoints | Backend Team | In Progress |
+| I-001 | Implement generic error handler | Backend Team | Not Started |
+
+### Short-term (Next Quarter)
+
+| ID | Mitigation | Owner | Status |
+|----|------------|-------|--------|
+| S-001 | Add MFA support | Auth Team | Planned |
+| R-002 | Implement audit logging | Platform Team | Planned |
+
+### Long-term
+
+| ID | Mitigation | Owner | Status |
+|----|------------|-------|--------|
+| D-001 | CDN with DDoS protection | Infrastructure | Backlog |
+
+---
+
+## 8. Appendices
+
+### A. Glossary
+
+| Term | Definition |
+|------|------------|
+| IDOR | Insecure Direct Object Reference |
+| PII | Personally Identifiable Information |
+| DFD | Data Flow Diagram |
+
+### B. References
+
+- [OWASP Threat Modeling](https://owasp.org/www-community/Threat_Modeling)
+- [Microsoft STRIDE](https://docs.microsoft.com/en-us/azure/security/develop/threat-modeling-tool-threats)
+- [Internal Security Standards]
+
+### C. Revision History
+
+| Version | Date | Author | Changes |
+|---------|------|--------|---------|
+| 1.0 | YYYY-MM-DD | [Name] | Initial version |
+
+---
+
+*This threat model should be reviewed and updated whenever significant changes are made to the system.*

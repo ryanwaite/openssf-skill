@@ -1,0 +1,115 @@
+# Security Policy
+
+## Supported Versions
+
+<!-- List versions that receive security updates. Update this table when releasing new versions. -->
+
+| Version | Supported          |
+| ------- | ------------------ |
+| x.x.x   | :white_check_mark: |
+| < x.x   | :x:                |
+
+## Reporting a Vulnerability
+
+We take security vulnerabilities seriously. We appreciate your efforts to responsibly disclose your findings.
+
+### How to Report
+
+**Please do NOT report security vulnerabilities through public GitHub issues.**
+
+Instead, please report security vulnerabilities using one of these methods:
+
+1. **GitHub Security Advisories** (Recommended)
+   - Go to the Security tab of this repository
+   - Click "Report a vulnerability"
+   - Fill out the form with details about the vulnerability
+
+2. **Email**
+   - Send an email to: [security@example.com]
+   - If possible, encrypt your message using our PGP key: [link to key]
+
+### What to Include
+
+To help us triage and respond quickly, please include:
+
+- **Description**: A clear description of the vulnerability
+- **Impact**: What an attacker could achieve by exploiting this
+- **Steps to reproduce**: Detailed steps to reproduce the issue
+- **Affected versions**: Which versions are affected
+- **Potential fixes**: Any suggestions for fixing the issue (optional)
+- **References**: Links to related CVEs, blog posts, or other resources (optional)
+
+### What to Expect
+
+| Stage | Timeline |
+|-------|----------|
+| Initial acknowledgment | Within 48 hours |
+| Initial assessment | Within 7 days |
+| Status update | Every 14 days until resolved |
+| Resolution target | Within 90 days (severity dependent) |
+
+We will:
+1. Acknowledge receipt of your report
+2. Assess the severity and impact
+3. Work on a fix and coordinate a release
+4. Credit you in the security advisory (unless you prefer anonymity)
+
+### Disclosure Policy
+
+We follow **coordinated disclosure**:
+
+1. You report the vulnerability privately to us
+2. We confirm the issue and assess severity
+3. We develop, test, and release a fix
+4. We publish a security advisory
+5. Details are publicly disclosed after users have had time to update
+
+We ask that you:
+- Give us reasonable time to address the issue before public disclosure
+- Avoid accessing or modifying data that doesn't belong to you
+- Act in good faith to avoid privacy violations, service disruptions, and data destruction
+
+### Scope
+
+This security policy applies to:
+- This repository and its releases
+- Official documentation
+
+Out of scope:
+- Third-party dependencies (please report to those maintainers)
+- Social engineering attacks
+- Physical attacks
+
+## Security Best Practices for Users
+
+<!-- Add guidance specific to your project -->
+
+When using this project, we recommend:
+
+- Keep your installation up to date with the latest releases
+- Review the changelog for security-related updates
+- Follow the principle of least privilege when configuring access
+- Enable audit logging where available
+
+## Security Measures
+
+<!-- Document what security measures the project implements -->
+
+This project implements the following security measures:
+
+- [ ] Automated dependency scanning with Dependabot/Renovate
+- [ ] Static analysis with CodeQL
+- [ ] OpenSSF Scorecard monitoring
+- [ ] Signed releases
+- [ ] SBOM generation
+
+## Acknowledgments
+
+We would like to thank the following individuals for responsibly disclosing security issues:
+
+<!-- Add acknowledgments here as issues are resolved -->
+- *None yet*
+
+---
+
+*This security policy follows [OpenSSF best practices](https://best.openssf.org/) for open source security.*

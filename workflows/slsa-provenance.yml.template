@@ -1,0 +1,107 @@
+# SLSA Provenance Workflow
+# This workflow generates SLSA Level 3 provenance for release artifacts.
+# Provenance helps consumers verify the integrity of your software.
+
+name: SLSA Provenance
+
+on:
+  release:
+    types: [published]
+
+  # Allow manual triggering for testing
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build (e.g., v1.0.0)'
+        required: true
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  # Build job - customize this for your project
+  build:
+    name: Build Artifacts
+    runs-on: ubuntu-latest
+    outputs:
+      digests: ${{ steps.hash.outputs.digests }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      # =======================================================
+      # CUSTOMIZE: Add your build steps here
+      # =======================================================
+      - name: Build
+        run: |
+          echo "Add your build commands here"
+          # Example for Go:
+          # go build -o dist/myapp ./cmd/myapp
+
+          # Example for Node.js:
+          # npm ci
+          # npm run build
+
+          # Example for Python:
+          # python -m build
+
+          mkdir -p dist
+          echo "placeholder" > dist/artifact.txt
+
+      # =======================================================
+      # Generate hashes for SLSA provenance
+      # =======================================================
+      - name: Generate artifact hashes
+        id: hash
+        run: |
+          cd dist
+          # Generate SHA256 hashes for all artifacts
+          sha256sum * > checksums.txt
+          # Encode for SLSA generator
+          echo "digests=$(base64 -w0 checksums.txt)" >> $GITHUB_OUTPUT
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@5d5d22a31266ced268874388b861e4b58bb5c2f3 # v4.3.1
+        with:
+          name: build-artifacts
+          path: dist/
+          if-no-files-found: error
+
+  # Generate SLSA provenance
+  provenance:
+    name: Generate Provenance
+    needs: build
+    permissions:
+      actions: read
+      id-token: write
+      contents: write
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.0.0
+    with:
+      base64-subjects: "${{ needs.build.outputs.digests }}"
+      upload-assets: true  # Attach provenance to GitHub release
+
+  # Upload artifacts to release
+  release:
+    name: Upload to Release
+    needs: [build, provenance]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'release'
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@c850b930e6ba138125429b7e5c93fc707a7f8427 # v4.1.4
+        with:
+          name: build-artifacts
+          path: dist/
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@9d7c94cfd0a1f3ed45544c887983e9fa900f0564 # v2.0.4
+        with:
+          files: dist/*
