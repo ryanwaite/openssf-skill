@@ -1,6 +1,8 @@
-# OpenSSF Security Skill for Claude Code
+# OpenSSF Security Instructions for AI Coding Assistants
 
-A comprehensive Claude Code skill that helps developers build secure applications following [OpenSSF (Open Source Security Foundation)](https://openssf.org/) best practices.
+A comprehensive set of security instructions and resources that help developers build secure applications following [OpenSSF (Open Source Security Foundation)](https://openssf.org/) best practices.
+
+**Supports both Claude Code and GitHub Copilot.**
 
 ## Features
 
@@ -13,40 +15,69 @@ A comprehensive Claude Code skill that helps developers build secure application
 - **Dependency Security**: Scanning tools and vulnerability response
 - **Security Code Review**: OWASP Top 10 focused review guide
 
+---
+
 ## Installation
 
-### Option 1: Clone to Global Skills (Recommended)
+### For GitHub Copilot
+
+Copy the Copilot instructions file to your repository:
+
+```bash
+# Create .github directory if it doesn't exist
+mkdir -p .github
+
+# Download the instructions file
+curl -o .github/copilot-instructions.md \
+  https://raw.githubusercontent.com/ryanwaite/openssf-skill/main/.github/copilot-instructions.md
+```
+
+Then enable custom instructions in VS Code:
+1. Open Settings (`Cmd+,` or `Ctrl+,`)
+2. Search for "Copilot instruction"
+3. Enable `github.copilot.chat.codeGeneration.useInstructionFiles`
+
+Copilot will now apply OpenSSF security best practices to all code suggestions in that repository.
+
+### For Claude Code
+
+#### Option 1: Clone to Global Skills (Recommended)
 
 ```bash
 # Clone directly to your global skills directory
-git clone https://github.com/YOUR_USERNAME/openssf-skill.git ~/.claude/skills/openssf
+git clone https://github.com/ryanwaite/openssf-skill.git ~/.claude/skills/openssf
 ```
 
-### Option 2: Manual Installation
-
-```bash
-# Clone the repository
-git clone https://github.com/YOUR_USERNAME/openssf-skill.git
-
-# Copy to your global skills directory
-cp -r openssf-skill ~/.claude/skills/openssf
-```
-
-### Option 3: Project-Specific Installation
+#### Option 2: Project-Specific Installation
 
 ```bash
 # Clone into your project's .claude/skills directory
 mkdir -p .claude/skills
-git clone https://github.com/YOUR_USERNAME/openssf-skill.git .claude/skills/openssf
+git clone https://github.com/ryanwaite/openssf-skill.git .claude/skills/openssf
 ```
+
+Then invoke the skill in any project with `/openssf`.
+
+---
 
 ## Usage
 
-Once installed, invoke the skill in any project:
+### GitHub Copilot
 
-```
-/openssf
-```
+Once installed, Copilot automatically applies security best practices:
+- Secure coding patterns in suggestions
+- Input validation and parameterized queries
+- Proper error handling
+- Security-aware code completions
+
+### Claude Code
+
+Invoke the skill with `/openssf`, then:
+- "Help me create a threat model for my authentication system"
+- "Generate a SECURITY.md for this project"
+- "What OpenSSF Scorecard checks am I failing?"
+- "Set up SBOM generation for my releases"
+- "Review this code for security issues"
 
 The skill will:
 1. Assess your project's current security posture
@@ -54,21 +85,17 @@ The skill will:
 3. Recommend prioritized security improvements
 4. Guide you through creating security artifacts
 
-### Example Tasks
+---
 
-- "Help me create a threat model for my authentication system"
-- "Generate a SECURITY.md for this project"
-- "What OpenSSF Scorecard checks am I failing?"
-- "Set up SBOM generation for my releases"
-- "Review this code for security issues"
-
-## Skill Structure
+## Repository Structure
 
 ```
-openssf/
-├── SKILL.md                    # Main skill instructions
+openssf-skill/
+├── .github/
+│   └── copilot-instructions.md  # GitHub Copilot instructions
+├── SKILL.md                      # Claude Code skill file
 ├── scripts/
-│   └── assess-project.py       # Project security assessment
+│   └── assess-project.py         # Project security assessment
 ├── templates/
 │   ├── SECURITY.md.template
 │   ├── threat-model.md.template
@@ -79,16 +106,18 @@ openssf/
 │   ├── sbom-generation.yml.template
 │   └── dependency-review.yml.template
 └── references/
-    ├── threat-modeling/        # STRIDE methodology
-    ├── scorecard/              # All 20 checks + remediation
-    ├── osps-baseline/          # Compliance checklists
-    ├── sbom/                   # Language-specific tools
-    ├── slsa/                   # Supply chain security
-    ├── dependency-security/    # Vulnerability scanning
-    ├── security-policies/      # Policy creation guides
-    ├── security-requirements/  # Requirements checklist
-    └── code-review/            # Security review guide
+    ├── threat-modeling/          # STRIDE methodology
+    ├── scorecard/                # All 20 checks + remediation
+    ├── osps-baseline/            # Compliance checklists
+    ├── sbom/                     # Language-specific tools
+    ├── slsa/                     # Supply chain security
+    ├── dependency-security/      # Vulnerability scanning
+    ├── security-policies/        # Policy creation guides
+    ├── security-requirements/    # Requirements checklist
+    └── code-review/              # Security review guide
 ```
+
+---
 
 ## Security Topics Covered
 
@@ -103,10 +132,17 @@ openssf/
 | Dependencies | Vulnerability scanning, update strategies |
 | Code Review | OWASP Top 10, language-specific patterns |
 
+---
+
 ## Requirements
 
-- [Claude Code CLI](https://claude.ai/code) installed
-- Git (for cloning)
+| Tool | Required For |
+|------|--------------|
+| [GitHub Copilot](https://github.com/features/copilot) | Copilot instructions |
+| [Claude Code CLI](https://claude.ai/code) | Claude Code skill |
+| Git | Cloning the repository |
+
+---
 
 ## Contributing
 
@@ -121,12 +157,16 @@ Contributions are welcome! Please:
 
 - Additional language-specific security guides
 - More workflow templates (GitLab CI, CircleCI, etc.)
-- Translations
+- Copilot instruction improvements
 - Additional threat modeling methodologies
+
+---
 
 ## License
 
 MIT License - see [LICENSE](LICENSE) for details.
+
+---
 
 ## References
 
@@ -135,6 +175,9 @@ MIT License - see [LICENSE](LICENSE) for details.
 - [SLSA Framework](https://slsa.dev/)
 - [OSPS Baseline](https://baseline.openssf.org/)
 - [OWASP Top 10](https://owasp.org/www-project-top-ten/)
+- [GitHub Copilot Custom Instructions](https://docs.github.com/copilot/customizing-copilot/adding-custom-instructions-for-github-copilot)
+
+---
 
 ## Acknowledgments
 
