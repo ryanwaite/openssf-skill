@@ -139,7 +139,7 @@ openssf-skill/
 | Tool | Required For |
 |------|--------------|
 | [GitHub Copilot](https://github.com/features/copilot) | Copilot instructions |
-| [Claude Code CLI](https://claude.ai/code) | Claude Code skill |
+| [Claude Code](https://claude.com/product/claude-code) | Claude Code skill |
 | Git | Cloning the repository |
 
 ---
