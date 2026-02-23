@@ -86,6 +86,51 @@ The skill will:
 
 ---
 
+## Example Walkthrough
+
+This walkthrough demonstrates using the OpenSSF skill with GitHub Copilot to assess and improve the security posture of an open source repository.
+
+### Step 1: Invoke the Skill
+
+Start by invoking the OpenSSF skill in your project:
+
+![Invoke OpenSSF Skill](docs/images/01-invoke-openssf-skill.png)
+
+### What It Can Do
+
+The skill looks at the project and provides an assessment of the overall project:
+
+![Ask Capabilities](docs/images/02-ask-capabilities.png)
+
+### Comprehensive List of Available Capabilities
+
+The skill provides a comprehensive list of security features it can help with:
+
+![Capabilities List](docs/images/03-capabilities-list.png)
+![Scorecard Suggestion](docs/images/04-scorecard-suggestion.png)
+
+### Recommendation for Next Steps
+
+The skill provides a prioritized list of what to do next along with the approximate time to complete each activity:
+
+![Run Scorecard](docs/images/05-run-scorecard.png)
+
+### Step 2: Run Scorecard
+
+In this walkthrough we go with the recommendation to start with running Scorecard:
+
+![Scorecard Results](docs/images/06-scorecard-results.png)
+
+### Scorecard Results
+
+The skill spins up a container, runs the Scorecard analysis, and provides the results:
+
+![Implement Improvements](docs/images/07-implement-improvements.png)
+
+From here, you can use the skill to keep implementing changes.
+
+---
+
 ## Repository Structure
 
 ```
