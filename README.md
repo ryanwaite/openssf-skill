@@ -62,15 +62,14 @@ Then invoke the skill in any project with `/openssf`.
 
 ## Usage
 
-### GitHub Copilot
+The most simple way to get started is:
+1. Start GitHub Copilot or Claude Code
+2. cd to the root of an open source project
+3. Run `/openssf what can you do for me?`
 
-Once installed, Copilot automatically applies security best practices:
-- Secure coding patterns in suggestions
-- Input validation and parameterized queries
-- Proper error handling
-- Security-aware code completions
+Additional options are below.
 
-### Claude Code
+### Additional options
 
 Invoke the skill with `/openssf`, then:
 - "Help me create a threat model for my authentication system"
