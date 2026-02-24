@@ -277,8 +277,8 @@ Example:
 | Risk Level | Count | Threats |
 |------------|-------|---------|
 | Critical | 2 | T-001, E-001 |
-| High | 4 | S-001, T-002, I-001, D-001 |
-| Medium | 2 | S-002, I-002 |
+| High | 6 | S-001, T-002, R-002, I-001, I-002, D-001 |
+| Medium | 2 | S-002, E-002 |
 | Low | 2 | R-001, D-002 |
 
 ### 6.2 Top Risks

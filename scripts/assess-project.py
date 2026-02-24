@@ -13,12 +13,14 @@ Usage: python3 assess-project.py [project_path]
 Output: JSON report with project context and prioritized recommendations.
 """
 
-import os
 import sys
 import json
-import glob
 from pathlib import Path
 from typing import Dict, List, Any
+
+# Directories to exclude from recursive file searches
+_EXCLUDED_DIRS = {'.git', 'node_modules', 'vendor', '__pycache__', '.tox',
+                  '.venv', 'venv', 'dist', 'build', '.eggs'}
 
 
 def detect_languages(project_path: Path) -> List[Dict[str, Any]]:
@@ -87,22 +89,37 @@ def detect_languages(project_path: Path) -> List[Dict[str, Any]]:
     }
 
     detected = []
-    os.chdir(project_path)
 
     for lang, config in indicators.items():
         found = False
 
-        # Check for indicator files
+        # Check for indicator files (top-level and one level of recursion)
         for pattern in config['files']:
-            if glob.glob(pattern) or glob.glob(f'**/{pattern}', recursive=True):
+            # Check top-level match
+            if list(project_path.glob(pattern)):
                 found = True
+                break
+            # Check subdirectories, excluding common non-source dirs
+            for child in project_path.iterdir():
+                if child.is_dir() and child.name not in _EXCLUDED_DIRS:
+                    if list(child.rglob(pattern)):
+                        found = True
+                        break
+            if found:
                 break
 
         # Check for file extensions if not found by indicator files
         if not found:
             for ext in config['extensions']:
-                if glob.glob(f'**/*{ext}', recursive=True):
-                    found = True
+                for child in project_path.iterdir():
+                    if child.is_dir() and child.name not in _EXCLUDED_DIRS:
+                        if list(child.rglob(f'*{ext}')):
+                            found = True
+                            break
+                    elif child.suffix == ext:
+                        found = True
+                        break
+                if found:
                     break
 
         if found:
@@ -179,13 +196,12 @@ def check_security_artifacts(project_path: Path) -> Dict[str, Dict[str, Any]]:
         },
     }
 
-    os.chdir(project_path)
     results = {}
 
     for artifact, config in artifacts.items():
         found_path = None
         for path in config['paths']:
-            if Path(path).exists():
+            if (project_path / path).exists():
                 found_path = path
                 break
 
@@ -201,55 +217,53 @@ def check_security_artifacts(project_path: Path) -> Dict[str, Dict[str, Any]]:
 
 def check_ci_setup(project_path: Path) -> Dict[str, Any]:
     """Check CI/CD configuration."""
-    os.chdir(project_path)
+    workflows_dir = project_path / '.github' / 'workflows'
 
     ci_systems = {
-        'github_actions': Path('.github/workflows').exists(),
-        'gitlab_ci': Path('.gitlab-ci.yml').exists(),
-        'circle_ci': Path('.circleci/config.yml').exists(),
-        'travis_ci': Path('.travis.yml').exists(),
-        'jenkins': Path('Jenkinsfile').exists(),
-        'azure_pipelines': Path('azure-pipelines.yml').exists(),
+        'github_actions': workflows_dir.exists(),
+        'gitlab_ci': (project_path / '.gitlab-ci.yml').exists(),
+        'circle_ci': (project_path / '.circleci' / 'config.yml').exists(),
+        'travis_ci': (project_path / '.travis.yml').exists(),
+        'jenkins': (project_path / 'Jenkinsfile').exists(),
+        'azure_pipelines': (project_path / 'azure-pipelines.yml').exists(),
     }
 
-    # Check for test directories
+    # Check for test directories and test file patterns
     test_indicators = [
-        Path('tests').exists(),
-        Path('test').exists(),
-        Path('__tests__').exists(),
-        Path('spec').exists(),
-        bool(glob.glob('*_test.go')),
-        bool(glob.glob('test_*.py')),
-        bool(glob.glob('*_test.py')),
-        bool(glob.glob('*.test.js')),
-        bool(glob.glob('*.spec.js')),
-        bool(glob.glob('*.test.ts')),
-        bool(glob.glob('*.spec.ts')),
+        (project_path / 'tests').exists(),
+        (project_path / 'test').exists(),
+        (project_path / '__tests__').exists(),
+        (project_path / 'spec').exists(),
+        bool(list(project_path.glob('*_test.go'))),
+        bool(list(project_path.glob('test_*.py'))),
+        bool(list(project_path.glob('*_test.py'))),
+        bool(list(project_path.glob('*.test.js'))),
+        bool(list(project_path.glob('*.spec.js'))),
+        bool(list(project_path.glob('*.test.ts'))),
+        bool(list(project_path.glob('*.spec.ts'))),
     ]
 
     return {
         'ci_systems': {k: v for k, v in ci_systems.items() if v},
         'has_ci': any(ci_systems.values()),
         'has_tests': any(test_indicators),
-        'workflows_count': len(list(Path('.github/workflows').glob('*.yml'))) if Path('.github/workflows').exists() else 0
+        'workflows_count': len(list(workflows_dir.glob('*.yml'))) if workflows_dir.exists() else 0
     }
 
 
 def check_branch_protection_indicators(project_path: Path) -> Dict[str, Any]:
     """Check for indicators of branch protection (can't fully verify without API)."""
-    os.chdir(project_path)
-
     # Check for PR template (suggests review process)
     pr_template_exists = any([
-        Path('.github/PULL_REQUEST_TEMPLATE.md').exists(),
-        Path('.github/pull_request_template.md').exists(),
-        Path('docs/pull_request_template.md').exists(),
+        (project_path / '.github' / 'PULL_REQUEST_TEMPLATE.md').exists(),
+        (project_path / '.github' / 'pull_request_template.md').exists(),
+        (project_path / 'docs' / 'pull_request_template.md').exists(),
     ])
 
     # Check CODEOWNERS (suggests review requirements)
     codeowners_exists = any([
-        Path('CODEOWNERS').exists(),
-        Path('.github/CODEOWNERS').exists(),
+        (project_path / 'CODEOWNERS').exists(),
+        (project_path / '.github' / 'CODEOWNERS').exists(),
     ])
 
     return {
@@ -262,10 +276,12 @@ def check_branch_protection_indicators(project_path: Path) -> Dict[str, Any]:
 def generate_recommendations(
     languages: List[Dict],
     artifacts: Dict[str, Dict],
-    ci_setup: Dict[str, Any]
+    ci_setup: Dict[str, Any],
+    branch_protection: Dict[str, Any] = None
 ) -> List[Dict[str, Any]]:
     """Generate prioritized security recommendations based on assessment."""
     recommendations = []
+    branch_protection = branch_protection or {}
 
     # Critical: Security policy
     if not artifacts['security_policy']['exists']:
@@ -377,6 +393,17 @@ def generate_recommendations(
             'time_estimate': '10 minutes'
         })
 
+    # Medium: PR template (branch protection indicator)
+    if not branch_protection.get('pr_template_exists'):
+        recommendations.append({
+            'priority': 'medium',
+            'category': 'governance',
+            'action': 'Add pull request template',
+            'reason': 'PR templates encourage security-focused reviews and consistent review processes.',
+            'effort': 'low',
+            'time_estimate': '15 minutes'
+        })
+
     # Sort by priority
     priority_order = {'critical': 0, 'high': 1, 'medium': 2, 'low': 3}
     recommendations.sort(key=lambda x: priority_order.get(x['priority'], 99))
@@ -384,8 +411,10 @@ def generate_recommendations(
     return recommendations
 
 
-def calculate_security_score(artifacts: Dict, ci_setup: Dict) -> Dict[str, Any]:
+def calculate_security_score(artifacts: Dict, ci_setup: Dict,
+                             branch_protection: Dict = None) -> Dict[str, Any]:
     """Calculate a simple security posture score."""
+    branch_protection = branch_protection or {}
     total_checks = 0
     passed_checks = 0
 
@@ -396,11 +425,10 @@ def calculate_security_score(artifacts: Dict, ci_setup: Dict) -> Dict[str, Any]:
         if artifacts.get(item, {}).get('exists'):
             passed_checks += 3
 
-    # High priority checks (weighted x2)
-    high_items = ['dependabot', 'renovate']
-    total_checks += 2  # Only one needed
+    # High priority check: dependency updates (either Dependabot or Renovate)
+    total_checks += 1
     if artifacts.get('dependabot', {}).get('exists') or artifacts.get('renovate', {}).get('exists'):
-        passed_checks += 2
+        passed_checks += 1
 
     # Medium priority checks
     medium_items = ['scorecard_workflow', 'codeql_workflow', 'sbom', 'threat_model']
@@ -415,6 +443,14 @@ def calculate_security_score(artifacts: Dict, ci_setup: Dict) -> Dict[str, Any]:
         passed_checks += 1
     if ci_setup.get('has_tests'):
         passed_checks += 1
+
+    # Branch protection indicators
+    if branch_protection:
+        total_checks += 2
+        if branch_protection.get('pr_template_exists'):
+            passed_checks += 1
+        if branch_protection.get('codeowners_exists'):
+            passed_checks += 1
 
     score = round((passed_checks / total_checks) * 100) if total_checks > 0 else 0
 
@@ -460,8 +496,8 @@ def main():
     artifacts = check_security_artifacts(project_path)
     ci_setup = check_ci_setup(project_path)
     branch_protection = check_branch_protection_indicators(project_path)
-    recommendations = generate_recommendations(languages, artifacts, ci_setup)
-    security_score = calculate_security_score(artifacts, ci_setup)
+    recommendations = generate_recommendations(languages, artifacts, ci_setup, branch_protection)
+    security_score = calculate_security_score(artifacts, ci_setup, branch_protection)
 
     # Build report
     report = {
