@@ -41,6 +41,7 @@ scorecard --repo=github.com/owner/repo --format=json > scorecard.json
 | [Binary-Artifacts](#binary-artifacts) | High | Checked-in binary files |
 | [CI-Tests](#ci-tests) | Low | Tests run in CI |
 | [CII-Best-Practices](#cii-best-practices) | Low | OpenSSF Best Practices Badge |
+| [Dependency-Update-Tool](#dependency-update-tool) | High | Automated dependency updates |
 | [Fuzzing](#fuzzing) | Medium | Fuzz testing integration |
 | [Packaging](#packaging) | Medium | Published as a package |
 | [Pinned-Dependencies](#pinned-dependencies) | Medium | Dependencies pinned to hashes |
@@ -225,6 +226,40 @@ SECURITY.md     @security-team
 - Encourage contributions from multiple maintainers
 - Accept contributions from the community
 - Document contribution process in CONTRIBUTING.md
+
+---
+
+### Dependency-Update-Tool
+
+**Risk Level**: High
+**What it checks**: Whether the project uses a dependency update tool (e.g., Dependabot, Renovate).
+
+**Scoring**:
+- Full score if Dependabot or Renovate is configured
+- Checks for `.github/dependabot.yml`, `renovate.json`, `.renovaterc`, or similar config files
+
+**How to remediate**:
+
+1. Enable Dependabot:
+
+```yaml
+# .github/dependabot.yml
+version: 2
+updates:
+  - package-ecosystem: "npm"  # or pip, gomod, cargo, maven, etc.
+    directory: "/"
+    schedule:
+      interval: "weekly"
+```
+
+2. Or configure Renovate:
+
+```json
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended"]
+}
+```
 
 ---
 

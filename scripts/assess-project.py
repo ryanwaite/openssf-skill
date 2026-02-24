@@ -175,7 +175,8 @@ def check_security_artifacts(project_path: Path) -> Dict[str, Dict[str, Any]]:
             'priority': 'medium'
         },
         'codeql_workflow': {
-            'paths': ['.github/workflows/codeql.yml', '.github/workflows/codeql-analysis.yml'],
+            'paths': ['.github/workflows/codeql.yml', '.github/workflows/codeql.yaml',
+                      '.github/workflows/codeql-analysis.yml', '.github/workflows/codeql-analysis.yaml'],
             'description': 'CodeQL security scanning',
             'priority': 'medium'
         },
@@ -247,7 +248,8 @@ def check_ci_setup(project_path: Path) -> Dict[str, Any]:
         'ci_systems': {k: v for k, v in ci_systems.items() if v},
         'has_ci': any(ci_systems.values()),
         'has_tests': any(test_indicators),
-        'workflows_count': len(list(workflows_dir.glob('*.yml'))) if workflows_dir.exists() else 0
+        'workflows_count': len([f for f in workflows_dir.iterdir()
+                                if f.suffix in ('.yml', '.yaml')]) if workflows_dir.exists() else 0
     }
 
 
@@ -403,6 +405,31 @@ def generate_recommendations(
             'effort': 'low',
             'time_estimate': '15 minutes'
         })
+
+    # Language-specific recommendations
+    lang_names = {l['language'] for l in languages}
+
+    lang_audit_tools = {
+        'python': ('pip-audit', 'pip-audit scans Python dependencies for known vulnerabilities.'),
+        'javascript': ('npm audit', 'npm audit scans Node.js dependencies for known vulnerabilities.'),
+        'go': ('govulncheck', 'govulncheck checks Go dependencies against the Go vulnerability database.'),
+        'rust': ('cargo audit', 'cargo audit checks Rust crate dependencies for known vulnerabilities.'),
+        'ruby': ('bundler-audit', 'bundler-audit scans Ruby gem dependencies for known vulnerabilities.'),
+        'java': ('OWASP Dependency-Check', 'OWASP Dependency-Check scans Java dependencies for known CVEs.'),
+        'php': ('composer audit', 'composer audit scans PHP dependencies for known vulnerabilities.'),
+        'dotnet': ('dotnet list package --vulnerable', 'NuGet audit scans .NET dependencies for known vulnerabilities.'),
+    }
+
+    for lang_name, (tool, reason) in lang_audit_tools.items():
+        if lang_name in lang_names:
+            recommendations.append({
+                'priority': 'medium',
+                'category': 'dependencies',
+                'action': f'Run {tool} for {lang_name} dependency scanning',
+                'reason': reason,
+                'effort': 'low',
+                'time_estimate': '10 minutes'
+            })
 
     # Sort by priority
     priority_order = {'critical': 0, 'high': 1, 'medium': 2, 'low': 3}

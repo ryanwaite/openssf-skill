@@ -8,7 +8,7 @@ A comprehensive set of security instructions and resources that help developers 
 
 - **Threat Modeling**: STRIDE methodology guide with templates
 - **Security Policies**: SECURITY.md and vulnerability disclosure templates
-- **OpenSSF Scorecard**: All 20 checks explained with remediation steps
+- **OpenSSF Scorecard**: All 19 checks explained with remediation steps
 - **OSPS Baseline**: Level 1 compliance checklist
 - **SBOM Generation**: Tools for 12+ languages/ecosystems
 - **SLSA Provenance**: GitHub Actions workflows for Level 3
@@ -151,7 +151,7 @@ openssf-skill/
 │   └── dependency-review.yml.template
 └── references/
     ├── threat-modeling/          # STRIDE methodology
-    ├── scorecard/                # All 20 checks + remediation
+    ├── scorecard/                # All 19 checks + remediation
     ├── osps-baseline/            # Compliance checklists
     ├── sbom/                     # Language-specific tools
     ├── slsa/                     # Supply chain security
@@ -169,10 +169,10 @@ openssf-skill/
 |-------|-------------|
 | Threat Modeling | STRIDE methodology, DFD creation, risk assessment |
 | Security Policies | SECURITY.md, vulnerability disclosure, response timelines |
-| OpenSSF Scorecard | 20 automated security checks with remediation |
-| OSPS Baseline | Level 1-3 compliance requirements |
+| OpenSSF Scorecard | 19 automated security checks with remediation |
+| OSPS Baseline | Level 1 compliance checklist |
 | SBOM | CycloneDX/SPDX generation for all major languages |
-| SLSA | Supply chain security levels 1-4 |
+| SLSA | Supply chain security levels 0-3 |
 | Dependencies | Vulnerability scanning, update strategies |
 | Code Review | OWASP Top 10, language-specific patterns |
 
