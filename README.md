@@ -14,6 +14,12 @@ A comprehensive set of security instructions and resources that help developers 
 - **SLSA Provenance**: GitHub Actions workflows for Level 3
 - **Dependency Security**: Scanning tools and vulnerability response
 - **Security Code Review**: OWASP Top 10 focused review guide
+- **Secrets Scanning**: Gitleaks, TruffleHog, detect-secrets, and pre-commit hooks
+- **Artifact Signing**: Sigstore/Cosign keyless signing with Fulcio and Rekor
+- **Container Security**: Dockerfile hardening, Trivy/Grype scanning, distroless images
+- **OpenSSF Best Practices Badge**: Self-certification guide for Passing/Silver/Gold levels
+- **GitLab CI Support**: Security workflow templates for GitLab CI/CD pipelines
+- **Multi-Language Copilot Instructions**: Secure coding patterns for 8+ languages
 
 ---
 
@@ -138,8 +144,11 @@ openssf-skill/
 ├── .github/
 │   └── copilot-instructions.md  # GitHub Copilot instructions
 ├── SKILL.md                      # Claude Code skill file
+├── CONTRIBUTING.md               # Contribution guidelines
 ├── scripts/
 │   └── assess-project.py         # Project security assessment
+├── tests/
+│   └── test_assess_project.py    # Unit tests (50 tests)
 ├── templates/
 │   ├── SECURITY.md.template
 │   ├── threat-model.md.template
@@ -148,7 +157,8 @@ openssf-skill/
 │   ├── scorecard.yml.template
 │   ├── slsa-provenance.yml.template
 │   ├── sbom-generation.yml.template
-│   └── dependency-review.yml.template
+│   ├── dependency-review.yml.template
+│   └── gitlab-ci-security.yml.template  # GitLab CI/CD
 └── references/
     ├── threat-modeling/          # STRIDE methodology
     ├── scorecard/                # All 19 checks + remediation
@@ -158,7 +168,11 @@ openssf-skill/
     ├── dependency-security/      # Vulnerability scanning
     ├── security-policies/        # Policy creation guides
     ├── security-requirements/    # Requirements checklist
-    └── code-review/              # Security review guide
+    ├── code-review/              # Security review guide
+    ├── secrets-scanning/         # Secret leak prevention
+    ├── signing/                  # Sigstore/Cosign guide
+    ├── container-security/       # Docker hardening
+    └── best-practices-badge/     # OpenSSF Badge guide
 ```
 
 ---
@@ -175,6 +189,10 @@ openssf-skill/
 | SLSA | Supply chain security levels 0-3 |
 | Dependencies | Vulnerability scanning, update strategies |
 | Code Review | OWASP Top 10, language-specific patterns |
+| Secrets Scanning | Gitleaks, TruffleHog, detect-secrets, pre-commit hooks |
+| Artifact Signing | Sigstore ecosystem: Cosign, Fulcio, Rekor, Gitsign |
+| Container Security | Dockerfile hardening, image scanning, distroless bases |
+| Best Practices Badge | OpenSSF Badge self-certification (Passing/Silver/Gold) |
 
 ---
 
@@ -190,19 +208,13 @@ openssf-skill/
 
 ## Contributing
 
-Contributions are welcome! Please:
+Contributions are welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed guidelines, content standards, and testing instructions.
 
+Quick start:
 1. Fork the repository
 2. Create a feature branch
-3. Make your changes
+3. Make your changes (run `python3 -m unittest discover tests/ -v` to validate)
 4. Submit a pull request
-
-### Areas for Contribution
-
-- Additional language-specific security guides
-- More workflow templates (GitLab CI, CircleCI, etc.)
-- Copilot instruction improvements
-- Additional threat modeling methodologies
 
 ---
 

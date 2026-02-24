@@ -10,10 +10,10 @@ This guide provides step-by-step remediation for common Scorecard issues, organi
 **Effort**: 15 minutes
 
 ```bash
-# Create from template
-cp ~/.claude/skills/openssf/templates/SECURITY.md.template SECURITY.md
+# Create from template (adjust path to where you installed the skill)
+cp templates/SECURITY.md.template SECURITY.md
 # Or create in .github/
-cp ~/.claude/skills/openssf/templates/SECURITY.md.template .github/SECURITY.md
+cp templates/SECURITY.md.template .github/SECURITY.md
 ```
 
 Edit the template to add:
@@ -150,13 +150,16 @@ updates:
 
 #### GitHub Actions
 
-Use [pin-github-action](https://github.com/mheap/pin-github-action):
+Use [pinact](https://github.com/suzuki-shunsuke/pinact):
 ```bash
-# Install
-npm install -g pin-github-action
+# Install (Go)
+go install github.com/suzuki-shunsuke/pinact/cmd/pinact@latest
+
+# Or via Homebrew
+brew install suzuki-shunsuke/pinact/pinact
 
 # Pin all actions in a workflow
-pin-github-action .github/workflows/ci.yml
+pinact run
 ```
 
 Before:
@@ -237,10 +240,11 @@ find . -type f \( -name "*.exe" -o -name "*.dll" -o -name "*.so" \
 
 2. Remove from git history (if needed):
 ```bash
+# Install git-filter-repo (recommended over deprecated git filter-branch)
+pip install git-filter-repo
+
 # Remove file from history
-git filter-branch --force --index-filter \
-  "git rm --cached --ignore-unmatch path/to/binary" \
-  --prune-empty --tag-name-filter cat -- --all
+git filter-repo --path path/to/binary --invert-paths
 ```
 
 3. Add to `.gitignore`:

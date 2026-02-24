@@ -195,6 +195,36 @@ def check_security_artifacts(project_path: Path) -> Dict[str, Dict[str, Any]]:
             'description': 'Security contact information (RFC 9116)',
             'priority': 'low'
         },
+        'slsa_provenance_workflow': {
+            'paths': ['.github/workflows/slsa-provenance.yml', '.github/workflows/slsa-provenance.yaml',
+                      '.github/workflows/slsa.yml', '.github/workflows/slsa.yaml',
+                      '.github/workflows/provenance.yml', '.github/workflows/provenance.yaml'],
+            'description': 'SLSA provenance generation workflow',
+            'priority': 'medium'
+        },
+        'sbom_workflow': {
+            'paths': ['.github/workflows/sbom.yml', '.github/workflows/sbom.yaml',
+                      '.github/workflows/sbom-generation.yml', '.github/workflows/sbom-generation.yaml'],
+            'description': 'SBOM generation workflow',
+            'priority': 'medium'
+        },
+        'pre_commit_config': {
+            'paths': ['.pre-commit-config.yaml', '.pre-commit-config.yml'],
+            'description': 'Pre-commit hooks configuration',
+            'priority': 'low'
+        },
+        'gitleaks_config': {
+            'paths': ['.gitleaks.toml', '.gitleaks.yaml'],
+            'description': 'Gitleaks secret scanning configuration',
+            'priority': 'low'
+        },
+        'secrets_scanning_workflow': {
+            'paths': ['.github/workflows/gitleaks.yml', '.github/workflows/gitleaks.yaml',
+                      '.github/workflows/trufflehog.yml', '.github/workflows/trufflehog.yaml',
+                      '.github/workflows/secrets.yml', '.github/workflows/secrets.yaml'],
+            'description': 'Secrets scanning workflow',
+            'priority': 'medium'
+        },
     }
 
     results = {}
@@ -402,6 +432,50 @@ def generate_recommendations(
             'category': 'governance',
             'action': 'Add pull request template',
             'reason': 'PR templates encourage security-focused reviews and consistent review processes.',
+            'effort': 'low',
+            'time_estimate': '15 minutes'
+        })
+
+    # Medium: SLSA provenance
+    if ci_setup.get('has_ci') and not artifacts.get('slsa_provenance_workflow', {}).get('exists'):
+        recommendations.append({
+            'priority': 'medium',
+            'category': 'supply_chain',
+            'action': 'Add SLSA provenance workflow',
+            'reason': 'SLSA provenance provides verifiable evidence of where and how artifacts were built.',
+            'effort': 'medium',
+            'time_estimate': '30 minutes'
+        })
+
+    # Medium: SBOM workflow
+    if ci_setup.get('has_ci') and not artifacts.get('sbom_workflow', {}).get('exists') and not artifacts.get('sbom', {}).get('exists'):
+        recommendations.append({
+            'priority': 'medium',
+            'category': 'supply_chain',
+            'action': 'Add automated SBOM generation workflow',
+            'reason': 'Automating SBOM generation ensures every release includes a software inventory.',
+            'effort': 'low',
+            'time_estimate': '15 minutes'
+        })
+
+    # Medium: Secrets scanning
+    if ci_setup.get('has_ci') and not artifacts.get('secrets_scanning_workflow', {}).get('exists') and not artifacts.get('gitleaks_config', {}).get('exists'):
+        recommendations.append({
+            'priority': 'medium',
+            'category': 'security_scanning',
+            'action': 'Add secrets scanning (Gitleaks or TruffleHog)',
+            'reason': 'Secrets scanning detects leaked API keys, passwords, and tokens before they reach production.',
+            'effort': 'low',
+            'time_estimate': '10 minutes'
+        })
+
+    # Low: Pre-commit hooks
+    if not artifacts.get('pre_commit_config', {}).get('exists'):
+        recommendations.append({
+            'priority': 'low',
+            'category': 'quality',
+            'action': 'Add pre-commit hooks',
+            'reason': 'Pre-commit hooks catch security issues (secrets, linting) before code enters version control.',
             'effort': 'low',
             'time_estimate': '15 minutes'
         })
