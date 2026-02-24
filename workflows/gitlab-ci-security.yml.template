@@ -1,0 +1,350 @@
+# GitLab CI Security Templates
+
+These templates replicate the GitHub Actions security workflows for GitLab CI/CD.
+
+## Dependency Scanning
+
+```yaml
+# .gitlab-ci.yml (merge with existing)
+
+stages:
+  - test
+  - security
+
+# ─── OSV Scanner ───────────────────────────────────────────────
+
+osv-scanner:
+  stage: security
+  image:
+    name: ghcr.io/google/osv-scanner:latest
+    entrypoint: [""]
+  script:
+    - osv-scanner --recursive .
+  allow_failure: true
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+# ─── Language-Specific Scans ──────────────────────────────────
+
+# Python
+pip-audit:
+  stage: security
+  image: python:3.13-slim
+  before_script:
+    - pip install pip-audit
+  script:
+    - pip-audit -r requirements.txt
+  allow_failure: true
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      exists:
+        - requirements.txt
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      exists:
+        - requirements.txt
+
+# JavaScript/TypeScript
+npm-audit:
+  stage: security
+  image: node:22-slim
+  script:
+    - npm audit --audit-level=high
+  allow_failure: true
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      exists:
+        - package.json
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      exists:
+        - package.json
+
+# Go
+govulncheck:
+  stage: security
+  image: golang:1.23
+  script:
+    - go install golang.org/x/vuln/cmd/govulncheck@latest
+    - govulncheck ./...
+  allow_failure: true
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      exists:
+        - go.mod
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      exists:
+        - go.mod
+
+# Rust
+cargo-audit:
+  stage: security
+  image: rust:1.83
+  before_script:
+    - cargo install cargo-audit
+  script:
+    - cargo audit
+  allow_failure: true
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      exists:
+        - Cargo.toml
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      exists:
+        - Cargo.toml
+```
+
+---
+
+## SBOM Generation
+
+```yaml
+# .gitlab-ci.yml
+
+sbom-generation:
+  stage: security
+  image:
+    name: anchore/syft:latest
+    entrypoint: [""]
+  script:
+    # CycloneDX format
+    - syft dir:. -o cyclonedx-json > sbom-cyclonedx.json
+    # SPDX format
+    - syft dir:. -o spdx-json > sbom-spdx.json
+  artifacts:
+    paths:
+      - sbom-cyclonedx.json
+      - sbom-spdx.json
+    expire_in: 90 days
+  rules:
+    - if: $CI_COMMIT_TAG
+
+# Attach SBOM to GitLab release
+release-sbom:
+  stage: security
+  image: registry.gitlab.com/gitlab-org/release-cli:latest
+  needs:
+    - sbom-generation
+  script:
+    - echo "Attaching SBOM to release"
+  release:
+    tag_name: $CI_COMMIT_TAG
+    description: "Release $CI_COMMIT_TAG"
+    assets:
+      links:
+        - name: SBOM (CycloneDX)
+          url: "${CI_PROJECT_URL}/-/jobs/${CI_JOB_ID}/artifacts/file/sbom-cyclonedx.json"
+        - name: SBOM (SPDX)
+          url: "${CI_PROJECT_URL}/-/jobs/${CI_JOB_ID}/artifacts/file/sbom-spdx.json"
+  rules:
+    - if: $CI_COMMIT_TAG
+```
+
+---
+
+## Secrets Scanning
+
+```yaml
+# .gitlab-ci.yml
+
+gitleaks:
+  stage: security
+  image:
+    name: zricethezav/gitleaks:latest
+    entrypoint: [""]
+  script:
+    - gitleaks detect --source . --verbose --report-format json --report-path gitleaks-report.json
+  artifacts:
+    paths:
+      - gitleaks-report.json
+    when: always
+    expire_in: 30 days
+  allow_failure: true
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+```
+
+---
+
+## SAST (Static Analysis)
+
+```yaml
+# .gitlab-ci.yml
+
+# Semgrep (multi-language SAST)
+semgrep:
+  stage: security
+  image:
+    name: semgrep/semgrep:latest
+    entrypoint: [""]
+  script:
+    - semgrep scan --config auto --json --output semgrep-results.json .
+  artifacts:
+    paths:
+      - semgrep-results.json
+    when: always
+    expire_in: 30 days
+  allow_failure: true
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+# Python-specific (Bandit)
+bandit:
+  stage: security
+  image: python:3.13-slim
+  before_script:
+    - pip install bandit
+  script:
+    - bandit -r . -f json -o bandit-results.json || true
+  artifacts:
+    paths:
+      - bandit-results.json
+    when: always
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      exists:
+        - "**/*.py"
+```
+
+---
+
+## Container Scanning
+
+```yaml
+# .gitlab-ci.yml
+
+container-scan:
+  stage: security
+  image:
+    name: aquasec/trivy:latest
+    entrypoint: [""]
+  variables:
+    IMAGE: "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA"
+  script:
+    - trivy image --severity HIGH,CRITICAL --exit-code 1 "$IMAGE"
+  allow_failure: true
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      exists:
+        - Dockerfile
+
+# Dockerfile linting
+hadolint:
+  stage: test
+  image:
+    name: hadolint/hadolint:latest-debian
+    entrypoint: [""]
+  script:
+    - hadolint Dockerfile
+  allow_failure: true
+  rules:
+    - exists:
+        - Dockerfile
+```
+
+---
+
+## Complete Example
+
+A full `.gitlab-ci.yml` combining all security stages:
+
+```yaml
+stages:
+  - build
+  - test
+  - security
+  - release
+
+variables:
+  IMAGE: "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA"
+
+# ─── Build ────────────────────────────────────────────────────
+
+build:
+  stage: build
+  image: docker:latest
+  services:
+    - docker:dind
+  script:
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+    - docker build -t "$IMAGE" .
+    - docker push "$IMAGE"
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+# ─── Tests ────────────────────────────────────────────────────
+
+test:
+  stage: test
+  script:
+    - echo "Run your tests here"
+
+# ─── Security ─────────────────────────────────────────────────
+
+include:
+  # Include any of the templates above, or inline them here
+
+osv-scanner:
+  stage: security
+  image:
+    name: ghcr.io/google/osv-scanner:latest
+    entrypoint: [""]
+  script:
+    - osv-scanner --recursive .
+  allow_failure: true
+
+gitleaks:
+  stage: security
+  image:
+    name: zricethezav/gitleaks:latest
+    entrypoint: [""]
+  script:
+    - gitleaks detect --source . --verbose
+  allow_failure: true
+
+semgrep:
+  stage: security
+  image:
+    name: semgrep/semgrep:latest
+    entrypoint: [""]
+  script:
+    - semgrep scan --config auto .
+  allow_failure: true
+
+container-scan:
+  stage: security
+  image:
+    name: aquasec/trivy:latest
+    entrypoint: [""]
+  script:
+    - trivy image --severity HIGH,CRITICAL "$IMAGE"
+  allow_failure: true
+  needs:
+    - build
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+# ─── Release ──────────────────────────────────────────────────
+
+sbom:
+  stage: release
+  image:
+    name: anchore/syft:latest
+    entrypoint: [""]
+  script:
+    - syft dir:. -o cyclonedx-json > sbom.json
+  artifacts:
+    paths:
+      - sbom.json
+  rules:
+    - if: $CI_COMMIT_TAG
+```
+
+---
+
+## Notes
+
+- GitLab also provides [built-in security scanning](https://docs.gitlab.com/ee/user/application_security/) (SAST, DAST, dependency scanning, container scanning, secret detection) as part of GitLab Ultimate. The templates above use open-source tools that work on any GitLab tier.
+- For GitLab's built-in features, add `include: template: Security/SAST.gitlab-ci.yml` etc.
+- All `allow_failure: true` settings are intentional for initial rollout — remove them once your pipeline is clean to enforce security gates.

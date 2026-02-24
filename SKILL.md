@@ -10,6 +10,10 @@ description: |
   - Implementing SLSA (Supply chain Levels for Software Artifacts)
   - Achieving OSPS Baseline compliance
   - Conducting security-focused code reviews
+  - Detecting and preventing secret leaks (Gitleaks, TruffleHog, detect-secrets)
+  - Signing artifacts with Sigstore (Cosign, Fulcio, Rekor)
+  - Hardening container images and Dockerfiles
+  - Earning the OpenSSF Best Practices Badge
   This skill helps developers "fall into the pit of success" by making secure practices the easy default path.
 ---
 
@@ -221,6 +225,70 @@ Provide security-focused code review guidance.
 
 See `references/code-review/security-review-guide.md` for checklist.
 
+### 10. Secrets Scanning
+
+Detect and prevent secret leaks in source code and commit history.
+
+**When to use**: Setting up secret leak prevention, responding to exposed credentials, or establishing pre-commit guardrails.
+
+**Tools**:
+- **Gitleaks**: Fast, configurable scanner for git repos and CI pipelines
+- **TruffleHog**: Deep entropy-based and regex detection across git history
+- **detect-secrets**: Yelp's baseline-aware pre-commit hook
+- **GitHub Secret Scanning**: Native GitHub push protection and alerts
+
+**Process**:
+1. Scan repository history for existing leaks
+2. Set up pre-commit hooks to prevent new leaks
+3. Integrate scanning into CI/CD pipeline
+4. Configure allowlists for false positives
+5. Establish incident response procedures for leaked secrets
+
+See `references/secrets-scanning/detection-tools.md` for tool details and configuration.
+
+### 11. Artifact Signing (Sigstore)
+
+Sign and verify software artifacts using the Sigstore ecosystem.
+
+**When to use**: Publishing releases, container images, SBOMs, or any artifact where consumers need to verify authenticity and provenance.
+
+**Components**:
+- **Cosign**: Sign and verify containers and blobs (keyless or key-based)
+- **Fulcio**: Certificate authority for short-lived signing certificates
+- **Rekor**: Transparency log for immutable signing records
+- **Gitsign**: Sign git commits with Sigstore keyless signing
+
+**Process**:
+1. Choose signing approach (keyless recommended for open source)
+2. Set up Cosign for container image signing in CI/CD
+3. Configure blob signing for release artifacts
+4. Integrate verification into deployment pipeline
+5. Publish signing policy documentation
+
+See `references/signing/sigstore-guide.md` for detailed setup and CI integration.
+
+### 12. Container Security
+
+Harden container images and scan for vulnerabilities.
+
+**When to use**: Building Docker containers, deploying to Kubernetes, or auditing existing container infrastructure.
+
+**Focus Areas**:
+- Minimal base images (distroless, Alpine, scratch)
+- Multi-stage builds to reduce attack surface
+- Non-root containers and read-only filesystems
+- Image vulnerability scanning (Trivy, Grype)
+- Dockerfile linting (hadolint)
+
+**Process**:
+1. Audit existing Dockerfiles for security anti-patterns
+2. Switch to minimal/distroless base images
+3. Implement multi-stage builds
+4. Set up automated image scanning in CI/CD
+5. Configure runtime security policies
+
+See `references/container-security/docker-guide.md` for best practices and examples.
+
 ## Workflow Guidelines
 
 ### Language-Agnostic Approach
@@ -251,9 +319,12 @@ For a new project without security artifacts, recommend this order:
 1. Create `SECURITY.md` (5 minutes) - establishes vulnerability reporting
 2. Enable branch protection (5 minutes) - prevents accidental pushes to main
 3. Set up Dependabot (5 minutes) - automated dependency updates
-4. Add OpenSSF Scorecard workflow (10 minutes) - continuous security monitoring
-5. Create initial threat model (30-60 minutes) - understand security landscape
-6. Implement remaining OSPS Baseline Level 1 requirements
+4. Add secrets scanning pre-commit hook (10 minutes) - prevents credential leaks
+5. Add OpenSSF Scorecard workflow (10 minutes) - continuous security monitoring
+6. Create initial threat model (30-60 minutes) - understand security landscape
+7. Set up SBOM generation (15 minutes) - supply chain transparency
+8. Sign release artifacts with Cosign (15 minutes) - artifact authenticity
+9. Implement remaining OSPS Baseline Level 1 requirements
 
 ## Output Format
 

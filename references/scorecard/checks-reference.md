@@ -40,7 +40,7 @@ scorecard --repo=github.com/owner/repo --format=json > scorecard.json
 |-------|------|-------------|
 | [Binary-Artifacts](#binary-artifacts) | High | Checked-in binary files |
 | [CI-Tests](#ci-tests) | Low | Tests run in CI |
-| [CII-Best-Practices](#cii-best-practices) | Low | OpenSSF Best Practices Badge |
+| [OpenSSF-Best-Practices](#openssf-best-practices) | Low | OpenSSF Best Practices Badge |
 | [Dependency-Update-Tool](#dependency-update-tool) | High | Automated dependency updates |
 | [Fuzzing](#fuzzing) | Medium | Fuzz testing integration |
 | [Packaging](#packaging) | Medium | Published as a package |
@@ -161,10 +161,12 @@ jobs:
 
 ---
 
-### CII-Best-Practices
+### OpenSSF-Best-Practices
 
 **Risk Level**: Low
-**What it checks**: Whether the project has an OpenSSF Best Practices Badge.
+**What it checks**: Whether the project has an OpenSSF Best Practices Badge (formerly CII Best Practices).
+
+See [Best Practices Badge Guide](../best-practices-badge/getting-started.md) for a detailed walkthrough.
 
 **Scoring**:
 - 10: Gold badge

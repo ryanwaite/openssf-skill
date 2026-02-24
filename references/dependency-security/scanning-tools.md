@@ -252,7 +252,7 @@ cargo deny check
 <plugin>
     <groupId>org.owasp</groupId>
     <artifactId>dependency-check-maven</artifactId>
-    <version>9.0.9</version>
+    <version>11.1.1</version>
     <executions>
         <execution>
             <goals>
@@ -283,7 +283,7 @@ mvn versions:use-latest-versions
 ```groovy
 // build.gradle
 plugins {
-    id 'org.owasp.dependencycheck' version '9.0.9'
+    id 'org.owasp.dependencycheck' version '11.1.1'
 }
 
 dependencyCheck {

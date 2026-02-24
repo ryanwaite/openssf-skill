@@ -82,6 +82,66 @@ stmt.setString(1, userId);
 factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
 ```
 
+### Rust
+```rust
+// Use parameterized queries with sqlx
+let user = sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = $1")
+    .bind(user_id)
+    .fetch_one(&pool)
+    .await?;
+
+// Avoid unwrap() in production — handle errors explicitly
+let config = read_config().map_err(|e| AppError::Config(e))?;
+
+// Use constant-time comparison for secrets
+use subtle::ConstantTimeEq;
+if provided_token.ct_eq(expected_token).into() { /* valid */ }
+```
+
+### Ruby
+```ruby
+# Use parameterized queries with ActiveRecord
+User.where("email = ?", user_email)
+# Never: User.where("email = '#{user_email}'")
+
+# Use strong parameters in Rails
+def user_params
+  params.require(:user).permit(:name, :email)
+end
+
+# Use safe YAML loading
+YAML.safe_load(data)
+# Never: YAML.load(data)
+```
+
+### PHP
+```php
+// Use prepared statements with PDO
+$stmt = $pdo->prepare('SELECT * FROM users WHERE id = :id');
+$stmt->execute(['id' => $userId]);
+
+// Use htmlspecialchars for output encoding
+echo htmlspecialchars($userInput, ENT_QUOTES, 'UTF-8');
+
+// Use password_hash for password storage
+$hash = password_hash($password, PASSWORD_ARGON2ID);
+```
+
+### C# / .NET
+```csharp
+// Use parameterized queries
+using var cmd = new SqlCommand("SELECT * FROM Users WHERE Id = @id", conn);
+cmd.Parameters.AddWithValue("@id", userId);
+
+// Use Data Protection API for encryption
+var protector = dataProtectionProvider.CreateProtector("purpose");
+var encrypted = protector.Protect(sensitiveData);
+
+// Validate anti-forgery tokens in ASP.NET
+[ValidateAntiForgeryToken]
+public IActionResult UpdateProfile(ProfileModel model) { }
+```
+
 ## Security Headers (Web Applications)
 
 Always recommend these HTTP security headers:

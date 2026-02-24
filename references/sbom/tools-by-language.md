@@ -123,17 +123,20 @@ yarn cyclonedx --output sbom.json
 pip install cyclonedx-bom
 
 # From requirements.txt
-cyclonedx-py requirements -i requirements.txt -o sbom.json --format json
+cyclonedx-py environment --of JSON > sbom.json
 
-# From Poetry
-cyclonedx-py poetry -o sbom.json --format json
+# From Poetry (lockfile)
+cyclonedx-py poetry --of JSON > sbom.json
 
-# From Pipenv
-cyclonedx-py pipenv -o sbom.json --format json
+# From Pipenv (lockfile)
+cyclonedx-py pipenv --of JSON > sbom.json
 
-# From pip freeze
-pip freeze | cyclonedx-py stdin -o sbom.json --format json
+# From pip (installed packages)
+cyclonedx-py pip --of JSON > sbom.json
 ```
+
+> **Note**: cyclonedx-python v4.x changed its CLI significantly. The commands above
+> use the v4+ syntax. If using v3.x, see the [migration guide](https://github.com/CycloneDX/cyclonedx-python).
 
 #### pip-audit (vulnerability scanning)
 ```bash
@@ -198,7 +201,7 @@ cargo sbom > sbom.spdx.json
 <plugin>
     <groupId>org.cyclonedx</groupId>
     <artifactId>cyclonedx-maven-plugin</artifactId>
-    <version>2.7.11</version>
+    <version>2.9.1</version>
     <executions>
         <execution>
             <phase>package</phase>
@@ -233,7 +236,7 @@ mvn cyclonedx:makeAggregateBom
 ```groovy
 // build.gradle
 plugins {
-    id 'org.cyclonedx.bom' version '1.8.2'
+    id 'org.cyclonedx.bom' version '1.10.0'
 }
 
 cyclonedxBom {
