@@ -44,7 +44,7 @@ A DFD visualizes how data moves through your system using these elements:
 │                     TRUST BOUNDARY                          │
 │  ┌──────────┐                          ┌──────────────┐    │
 │  │  Process │ ◄─────── data ──────────►│  Data Store  │    │
-│  └──────────┘                          └──────────────────┘    │
+│  └──────────┘                          └──────────────┘    │
 └─────────────────────────────────────────────────────────────┘
        ▲
        │ data

@@ -122,7 +122,7 @@ Run and interpret OpenSSF Scorecard, providing prioritized remediation.
 3. Prioritize fixes by risk level and effort
 4. Provide specific remediation steps for each failing check
 
-See `references/scorecard/checks-reference.md` for all 20 checks.
+See `references/scorecard/checks-reference.md` for all 19 checks.
 See `references/scorecard/remediation-guide.md` for fix guidance.
 Use `workflows/scorecard.yml.template` for automated scanning.
 
@@ -152,10 +152,10 @@ Guide through Supply chain Levels for Software Artifacts (SLSA) implementation.
 **When to use**: Hardening build pipeline, protecting against supply chain attacks, or meeting compliance requirements.
 
 **Levels**:
+- **Level 0**: No guarantees
 - **Level 1**: Document build process, generate provenance
 - **Level 2**: Source-aware builds, signed provenance
 - **Level 3**: Hardened CI, build definitions from source
-- **Level 4**: Fully isolated builds, tracked dependencies
 
 **Process**:
 1. Assess current build process
