@@ -265,7 +265,7 @@ openssf-skill/
 | Security Policies | SECURITY.md, vulnerability disclosure, response timelines |
 | OpenSSF Scorecard | 19 automated security checks with remediation |
 | OSPS Baseline | Level 1 compliance checklist |
-| SBOM | CycloneDX/SPDX generation for all major languages |
+| SBOM | SPDX generation (default) for all major languages |
 | SLSA | Supply chain security levels 0-3 |
 | Dependencies | Vulnerability scanning, update strategies |
 | Code Review | OWASP Top 10, language-specific patterns |

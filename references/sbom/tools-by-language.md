@@ -14,7 +14,7 @@ A Software Bill of Materials (SBOM) is a machine-readable inventory of all compo
 - **Best for**: Security, vulnerability tracking, lightweight automation
 - **Formats**: JSON, XML
 
-**Recommendation**: CycloneDX for security-focused use cases, SPDX for compliance. Many organizations generate both.
+**Recommendation**: This skill standardizes on **SPDX** (ISO/IEC 5962:2021) as the default SBOM format for generation, signing, and distribution. CycloneDX tooling is documented below for interoperability (e.g., feeding Dependency-Track, which ingests CycloneDX), but prefer SPDX unless a downstream consumer specifically requires CycloneDX.
 
 ---
 
@@ -30,17 +30,17 @@ curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -
 # Or via Homebrew
 brew install syft
 
-# Generate CycloneDX SBOM
-syft . -o cyclonedx-json > sbom.cyclonedx.json
-
-# Generate SPDX SBOM
+# Generate SPDX SBOM (default)
 syft . -o spdx-json > sbom.spdx.json
 
+# Generate CycloneDX SBOM (only if a consumer requires it)
+syft . -o cyclonedx-json > sbom.cyclonedx.json
+
 # Scan a container image
-syft alpine:latest -o cyclonedx-json > alpine-sbom.json
+syft alpine:latest -o spdx-json > alpine-sbom.json
 
 # Scan a directory
-syft dir:/path/to/project -o cyclonedx-json > project-sbom.json
+syft dir:/path/to/project -o spdx-json > project-sbom.json
 ```
 
 **Supported ecosystems**: npm, pip, go, cargo, maven, gradle, nuget, gem, composer, and more.
@@ -52,14 +52,14 @@ syft dir:/path/to/project -o cyclonedx-json > project-sbom.json
 # Install
 brew install trivy
 
-# Generate CycloneDX SBOM
-trivy fs --format cyclonedx --output sbom.cyclonedx.json .
-
-# Generate SPDX SBOM
+# Generate SPDX SBOM (default)
 trivy fs --format spdx-json --output sbom.spdx.json .
 
+# Generate CycloneDX SBOM (only if a consumer requires it)
+trivy fs --format cyclonedx --output sbom.cyclonedx.json .
+
 # Scan container
-trivy image --format cyclonedx myimage:latest > sbom.json
+trivy image --format spdx-json myimage:latest > sbom.json
 ```
 
 ### cdxgen (CycloneDX Generator)
@@ -317,13 +317,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Generate SBOM with Syft
-        uses: anchore/sbom-action@v0
-        with:
-          format: cyclonedx-json
-          output-file: sbom.cyclonedx.json
-
-      - name: Generate SPDX SBOM
+      - name: Generate SPDX SBOM with Syft
         uses: anchore/sbom-action@v0
         with:
           format: spdx-json
@@ -334,7 +328,6 @@ jobs:
         with:
           name: sbom
           path: |
-            sbom.cyclonedx.json
             sbom.spdx.json
 
       # Optionally attach to release
@@ -343,7 +336,6 @@ jobs:
         uses: softprops/action-gh-release@v1
         with:
           files: |
-            sbom.cyclonedx.json
             sbom.spdx.json
 ```
 
@@ -354,8 +346,8 @@ jobs:
   uses: aquasecurity/trivy-action@master
   with:
     scan-type: 'fs'
-    format: 'cyclonedx'
-    output: 'sbom.cyclonedx.json'
+    format: 'spdx-json'
+    output: 'sbom.spdx.json'
 ```
 
 ---
@@ -401,7 +393,7 @@ An SBOM should contain:
 4. **Sign the SBOM**: Use Sigstore or GPG to sign SBOM files
 5. **Store historically**: Keep SBOMs for audit trails
 6. **Update regularly**: Regenerate when dependencies change
-7. **Use both formats**: Generate both CycloneDX and SPDX if stakeholders need different formats
+7. **Prefer SPDX**: Generate SPDX by default; add CycloneDX only when a specific consumer (e.g., Dependency-Track) requires it
 
 ---
 
