@@ -4,7 +4,7 @@ description: |
   Comprehensive OpenSSF security guidance for software projects. Invoke this skill when developers need help with:
   - Creating threat models using STRIDE methodology
   - Writing security policies (SECURITY.md, vulnerability disclosure)
-  - Generating SBOMs (Software Bill of Materials) in SPDX or CycloneDX format
+  - Generating SBOMs (Software Bill of Materials) in SPDX format (default; CycloneDX available for interop)
   - Running and interpreting OpenSSF Scorecard with remediation guidance
   - Scanning dependencies for vulnerabilities
   - Implementing SLSA (Supply chain Levels for Software Artifacts)
@@ -97,13 +97,13 @@ See `references/security-policies/security-md-guide.md` for guidance.
 
 ### 3. SBOM Generation
 
-Guide Software Bill of Materials creation in SPDX or CycloneDX format.
+Guide Software Bill of Materials creation. This skill uses **SPDX** as the default format; generate CycloneDX only when a downstream consumer requires it.
 
 **When to use**: Preparing releases, compliance requirements, or improving supply chain transparency.
 
 **Formats**:
-- **SPDX**: ISO standard, good for compliance and legal
-- **CycloneDX**: Lightweight, automation-friendly, OWASP standard
+- **SPDX** (default): ISO/IEC 5962:2021 standard; broad tooling support for compliance, legal, and security
+- **CycloneDX**: OWASP standard; use when a consumer (e.g., Dependency-Track) specifically requires it
 
 **Process**:
 1. Identify package manager(s) in use

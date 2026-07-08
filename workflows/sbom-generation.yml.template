@@ -1,6 +1,6 @@
 # SBOM Generation Workflow
 # This workflow generates Software Bill of Materials (SBOM) for your project.
-# SBOMs are generated in both CycloneDX and SPDX formats.
+# SBOMs are generated in SPDX format.
 
 name: Generate SBOM
 
@@ -29,12 +29,6 @@ jobs:
       # =======================================================
       # Option 1: Use Syft (recommended for most projects)
       # =======================================================
-      - name: Generate CycloneDX SBOM
-        uses: anchore/sbom-action@ab5d7b5f48981941c4c5d6bf33aeb98fe3bae38c # v0.15.10
-        with:
-          format: cyclonedx-json
-          output-file: sbom.cyclonedx.json
-
       - name: Generate SPDX SBOM
         uses: anchore/sbom-action@ab5d7b5f48981941c4c5d6bf33aeb98fe3bae38c # v0.15.10
         with:
@@ -49,8 +43,8 @@ jobs:
       #   uses: aquasecurity/trivy-action@master
       #   with:
       #     scan-type: 'fs'
-      #     format: 'cyclonedx'
-      #     output: 'sbom.trivy.cyclonedx.json'
+      #     format: 'spdx-json'
+      #     output: 'sbom.trivy.spdx.json'
 
       # =======================================================
       # Upload as artifacts
@@ -60,7 +54,6 @@ jobs:
         with:
           name: sbom
           path: |
-            sbom.cyclonedx.json
             sbom.spdx.json
           retention-days: 90
 
@@ -72,7 +65,6 @@ jobs:
         uses: softprops/action-gh-release@9d7c94cfd0a1f3ed45544c887983e9fa900f0564 # v2.0.4
         with:
           files: |
-            sbom.cyclonedx.json
             sbom.spdx.json
 
       # =======================================================
@@ -81,12 +73,14 @@ jobs:
       - name: Scan SBOM for vulnerabilities
         uses: anchore/scan-action@3343887d815d7b07465f6fdcd395bd66508d486a # v3.6.4
         with:
-          sbom: sbom.cyclonedx.json
+          sbom: sbom.spdx.json
           fail-build: false  # Set to true to fail on vulnerabilities
 
       # =======================================================
       # Optional: Upload to Dependency Track
-      # Uncomment and configure if you use Dependency Track
+      # Uncomment and configure if you use Dependency Track.
+      # NOTE: Dependency-Track ingests CycloneDX only. If you use it, add a
+      # CycloneDX generation step (format: cyclonedx-json) and upload that file.
       # =======================================================
       # - name: Upload to Dependency Track
       #   run: |

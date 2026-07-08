@@ -35,7 +35,7 @@ osv-scanner --lockfile=package-lock.json
 osv-scanner -r . --format json > vulnerabilities.json
 
 # Scan SBOM
-osv-scanner --sbom=sbom.cyclonedx.json
+osv-scanner --sbom=sbom.spdx.json
 
 # Experimental: fix suggestions
 osv-scanner fix --non-interactive --strategy=in-place -L package-lock.json
@@ -82,7 +82,7 @@ grype dir:.
 grype myimage:latest
 
 # Scan SBOM
-grype sbom:./sbom.cyclonedx.json
+grype sbom:./sbom.spdx.json
 ```
 
 ### Snyk
@@ -159,7 +159,7 @@ pip-audit -r requirements.txt
 
 # Output formats
 pip-audit --format json > audit.json
-pip-audit --format cyclonedx-json > sbom.json
+# For an SBOM, generate SPDX with syft (see references/sbom): syft . -o spdx-json > sbom.spdx.json
 
 # Fix vulnerabilities
 pip-audit --fix

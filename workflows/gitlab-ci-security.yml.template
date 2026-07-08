@@ -106,13 +106,10 @@ sbom-generation:
     name: anchore/syft:latest
     entrypoint: [""]
   script:
-    # CycloneDX format
-    - syft dir:. -o cyclonedx-json > sbom-cyclonedx.json
     # SPDX format
     - syft dir:. -o spdx-json > sbom-spdx.json
   artifacts:
     paths:
-      - sbom-cyclonedx.json
       - sbom-spdx.json
     expire_in: 90 days
   rules:
@@ -131,8 +128,6 @@ release-sbom:
     description: "Release $CI_COMMIT_TAG"
     assets:
       links:
-        - name: SBOM (CycloneDX)
-          url: "${CI_PROJECT_URL}/-/jobs/${CI_JOB_ID}/artifacts/file/sbom-cyclonedx.json"
         - name: SBOM (SPDX)
           url: "${CI_PROJECT_URL}/-/jobs/${CI_JOB_ID}/artifacts/file/sbom-spdx.json"
   rules:
@@ -333,7 +328,7 @@ sbom:
     name: anchore/syft:latest
     entrypoint: [""]
   script:
-    - syft dir:. -o cyclonedx-json > sbom.json
+    - syft dir:. -o spdx-json > sbom.json
   artifacts:
     paths:
       - sbom.json
