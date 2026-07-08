@@ -1,25 +1,44 @@
-# OpenSSF Security Instructions for AI Coding Assistants
+# OpenSSF Security Skill
 
-A comprehensive set of security instructions and resources that help developers build secure applications following [OpenSSF (Open Source Security Foundation)](https://openssf.org/) best practices.
+A comprehensive Claude Code / GitHub Copilot skill that helps developers build
+secure applications following [OpenSSF (Open Source Security Foundation)](https://openssf.org/)
+best practices — and evaluate open source projects as an **ensemble**.
 
-**Supports both Claude Code and GitHub Copilot.**
+**Supports both GitHub Copilot and Claude Code.**
 
-## Features
+> **Two modes, one skill:**
+> - **Advisor** — *help me build or fix a specific control.* Threat models,
+>   SECURITY.md, SBOM setup, Sigstore signing, Dockerfile hardening, secrets
+>   pre-commit hooks, Scorecard workflows. Assess → recommend → implement.
+> - **Audit** — *tell me how safe this is.* Run the OpenSSF tools **together**
+>   and fuse the signals into one decision-ready verdict:
+>   - **Consume:** *Is this dependency safe to adopt?* → **Adopt / Adopt-with-mitigations / Avoid**
+>   - **Produce:** *Is the project we build trustworthy and hardened?* → **A–F posture grade + roadmap**
 
-- **Threat Modeling**: STRIDE methodology guide with templates
-- **Security Policies**: SECURITY.md and vulnerability disclosure templates
-- **OpenSSF Scorecard**: All 19 checks explained with remediation steps
-- **OSPS Baseline**: Level 1 compliance checklist
-- **SBOM Generation**: Tools for 12+ languages/ecosystems
-- **SLSA Provenance**: GitHub Actions workflows for Level 3
-- **Dependency Security**: Scanning tools and vulnerability response
-- **Security Code Review**: OWASP Top 10 focused review guide
-- **Secrets Scanning**: Gitleaks, TruffleHog, detect-secrets, and pre-commit hooks
-- **Artifact Signing**: Sigstore/Cosign keyless signing with Fulcio and Rekor
-- **Container Security**: Dockerfile hardening, Trivy/Grype scanning, distroless images
-- **OpenSSF Best Practices Badge**: Self-certification guide for Passing/Silver/Gold levels
-- **GitLab CI Support**: Security workflow templates for GitLab CI/CD pipelines
-- **Multi-Language Copilot Instructions**: Secure coding patterns for 8+ languages
+---
+
+## Why two modes?
+
+Sometimes you know exactly what you need — "generate a SECURITY.md," "set up
+SBOM generation," "harden this Dockerfile." That's **advisor** mode: it assesses
+your project, recommends prioritized next steps, and walks you through building
+the artifact using the bundled references, templates, and workflows.
+
+Other times you just want a verdict. Most security tooling makes you run
+Scorecard, then OSV-Scanner, then a secrets scan, then check signing… and then
+*you* decide what it all means. **Audit** mode does the fusing for you:
+
+```
+        Scorecard ─┐
+   OSV / audits ───┤
+         SBOM ─────┤      normalize → weight by mode → escalate      ┌─ Adopt / Avoid   (consume)
+   signing/SLSA ───┼──►   (live secrets & critical CVEs cap it)  ──► │
+       secrets ────┤            ensemble/risk-model.md                └─ A–F grade       (produce)
+   maintenance ────┤
+  OSPS Baseline ───┘
+```
+
+The same tools run in both audit sub-modes — **the mode only changes the weights**.
 
 ---
 
@@ -68,27 +87,52 @@ Then invoke the skill in any project with `/openssf`.
 
 ## Usage
 
-The most simple way to get started is:
+The simplest way to get started:
 1. Start GitHub Copilot or Claude Code
-2. cd to the root of an open source project
+2. `cd` to the root of an open source project
 3. Run `/openssf what can you do for me?`
 
-Additional options are below.
+The router sends your request to the right mode.
 
-### Additional options
+### Advisor mode — build or fix a specific control
 
-Invoke the skill with `/openssf`, then:
-- "Help me create a threat model for my authentication system"
-- "Generate a SECURITY.md for this project"
-- "What OpenSSF Scorecard checks am I failing?"
-- "Set up SBOM generation for my releases"
-- "Review this code for security issues"
+```
+/openssf help me create a threat model for my authentication system
+/openssf generate a SECURITY.md for this project
+/openssf what OpenSSF Scorecard checks am I failing?
+/openssf set up SBOM generation for my releases
+/openssf review this code for security issues
+```
 
 The skill will:
 1. Assess your project's current security posture
 2. Detect languages and existing security artifacts
 3. Recommend prioritized security improvements
 4. Guide you through creating security artifacts
+
+### Audit mode — get a verdict or grade
+
+```
+/openssf evaluate this repo
+/openssf is express@4.18.2 safe for us to adopt?
+/openssf grade our security posture before release
+```
+
+The agent establishes the mode (consume vs produce), runs the ensemble, and
+returns a verdict with evidence, ranked risks, and concrete next actions.
+
+#### Run the ensemble directly
+
+```bash
+# Evaluate a dependency you might adopt
+python3 scripts/ensemble-eval.py --target requests@2.31.0 --mode consume
+
+# Grade a repo you own
+python3 scripts/ensemble-eval.py --target . --mode produce --format md
+```
+
+Any tool that isn't installed is reported as `unknown` (and lowers confidence) —
+never silently skipped.
 
 ---
 
@@ -137,18 +181,54 @@ From here, you can use the skill to keep implementing changes.
 
 ---
 
+## How it works
+
+| Layer | File(s) | Role |
+|-------|---------|------|
+| **Router** | `SKILL.md`, `.github/copilot-instructions.md` | Sends the request to advisor or audit |
+| **Advisor** | `skills/advisor/` | Assess → recommend → implement a specific control |
+| **Audit orchestrator** | `skills/audit/` | Establishes consume/produce mode, runs the battery, produces the report |
+| **Audit modes** | `skills/audit/consume/`, `skills/audit/produce/` | Mode-specific batteries and outputs |
+| **Fusion engine** | `ensemble/risk-model.md` | Normalization, mode weights, escalation rules, outcome mapping |
+| **Output spec** | `ensemble/report-template.md` | The decision-ready report format |
+| **Runner** | `scripts/ensemble-eval.py` | Executes the audit ensemble, emits fused JSON/Markdown (degrades gracefully) |
+| **Detector** | `scripts/assess-project.py` | Local language/artifact detection |
+| **Grounding** | `references/` | Deep per-tool guidance both modes draw on |
+
+### The verdict, in short (audit mode)
+
+- **Mode sets the weights.** Consume leans on known CVEs + maintenance; produce
+  leans on secrets + provenance + code review.
+- **Escalations override the average.** A live secret or an unpatched CRITICAL
+  with a fix available caps the verdict no matter how good everything else looks.
+- **Unknown ≠ fine.** Missing data lowers confidence; it never inflates the score.
+- **Every claim cites a tool. Every verdict shows its math.** Two evaluators
+  running the same tools on the same target reach the same verdict.
+
+---
+
 ## Repository Structure
 
 ```
 openssf-skill/
 ├── .github/
-│   └── copilot-instructions.md  # GitHub Copilot instructions
-├── SKILL.md                      # Claude Code skill file
-├── CONTRIBUTING.md               # Contribution guidelines
+│   └── copilot-instructions.md   # GitHub Copilot instructions (router + secure-coding)
+├── SKILL.md                      # Claude Code skill file — router: advisor | audit
+├── skills/
+│   ├── advisor/SKILL.md          # Build/fix a specific control (v1 guidance behavior)
+│   └── audit/
+│       ├── SKILL.md              # Ensemble orchestrator (establishes consume/produce)
+│       ├── consume/SKILL.md      # Third-party OSS → Adopt / Adopt-with-mitigations / Avoid
+│       └── produce/SKILL.md      # Projects you ship → A–F grade + roadmap
+├── ensemble/
+│   ├── risk-model.md             # Normalization, weights, escalation, outcome mapping
+│   └── report-template.md        # Decision-ready report format
 ├── scripts/
-│   └── assess-project.py         # Project security assessment
+│   ├── assess-project.py         # Project language/artifact detection
+│   └── ensemble-eval.py          # Runs the audit ensemble, emits fused verdict
 ├── tests/
-│   └── test_assess_project.py    # Unit tests (50 tests)
+│   ├── test_assess_project.py    # Unit tests
+│   └── test_ensemble_eval.py     # Fusion / risk-model tests
 ├── templates/
 │   ├── SECURITY.md.template
 │   ├── threat-model.md.template
@@ -203,6 +283,7 @@ openssf-skill/
 | [GitHub Copilot](https://github.com/features/copilot) | Copilot instructions |
 | [Claude Code](https://claude.com/product/claude-code) | Claude Code skill |
 | Git | Cloning the repository |
+| Python 3 | Running `scripts/` and the ensemble runner |
 
 ---
 
