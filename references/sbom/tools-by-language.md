@@ -14,7 +14,9 @@ A Software Bill of Materials (SBOM) is a machine-readable inventory of all compo
 - **Best for**: Security, vulnerability tracking, lightweight automation
 - **Formats**: JSON, XML
 
-**Recommendation**: This skill standardizes on **SPDX** (ISO/IEC 5962:2021) as the default SBOM format for generation, signing, and distribution. CycloneDX tooling is documented below for interoperability (e.g., feeding Dependency-Track, which ingests CycloneDX), but prefer SPDX unless a downstream consumer specifically requires CycloneDX.
+**Recommendation**: This skill standardizes on **SPDX JSON 2.3** as its default for generation and distribution. Syft **v1.57.1** also supports SPDX JSON 2.2 and 3.0, but 3.0 is opt-in: verify your validator and downstream consumer before changing versions. CycloneDX remains an optional secondary format for consumers such as Dependency-Track. Signing is a separate release decision; an unsigned SBOM can still be useful.
+
+**Start now**: Choose one scope (source checkout, installed/build artifact, or runtime image), generate its SBOM, and label that scope. A source SBOM is **not** evidence of what a released binary contains. For a release, build the asset, inventory the actual file or immutable image digest, and record the matching artifact digest alongside its SBOM. You do not need to activate every scanner, registry, or signing tool to start.
 
 ---
 
@@ -24,20 +26,19 @@ A Software Bill of Materials (SBOM) is a machine-readable inventory of all compo
 **Best for**: Container images, file systems, multi-language projects
 
 ```bash
-# Install
-curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
-
-# Or via Homebrew
+# Install with your package manager, or download a versioned release
+# and verify its published checksum before running it.
 brew install syft
+syft version  # For the examples below, use v1.57.1 and check its output.
 
-# Generate SPDX SBOM (default)
+# Generate SPDX JSON 2.3 source-checkout SBOM (Syft v1.57.1 default)
 syft . -o spdx-json > sbom.spdx.json
 
 # Generate CycloneDX SBOM (only if a consumer requires it)
 syft . -o cyclonedx-json > sbom.cyclonedx.json
 
-# Scan a container image
-syft alpine:latest -o spdx-json > alpine-sbom.json
+# Scan the exact immutable runtime image that was shipped
+syft 'registry.example.org/owner/image@sha256:<actual-64-hex-digest>' -o spdx-json > image-sbom.spdx.json
 
 # Scan a directory
 syft dir:/path/to/project -o spdx-json > project-sbom.json
@@ -122,8 +123,11 @@ yarn cyclonedx --output sbom.json
 # Install
 pip install cyclonedx-bom
 
-# From requirements.txt
-cyclonedx-py environment --of JSON > sbom.json
+# From an installed environment
+cyclonedx-py environment --of JSON > environment.cyclonedx.json
+
+# From a requirements.txt file
+cyclonedx-py requirements requirements.txt --of JSON > requirements.cyclonedx.json
 
 # From Poetry (lockfile)
 cyclonedx-py poetry --of JSON > sbom.json
@@ -131,12 +135,9 @@ cyclonedx-py poetry --of JSON > sbom.json
 # From Pipenv (lockfile)
 cyclonedx-py pipenv --of JSON > sbom.json
 
-# From pip (installed packages)
-cyclonedx-py pip --of JSON > sbom.json
 ```
 
-> **Note**: cyclonedx-python v4.x changed its CLI significantly. The commands above
-> use the v4+ syntax. If using v3.x, see the [migration guide](https://github.com/CycloneDX/cyclonedx-python).
+`environment`, `requirements`, `pipenv`, and `poetry` are distinct inputs. There is no `cyclonedx-py pip` subcommand; use `environment` for the installed interpreter and `requirements` for a requirements file. Confirm the installed version's CLI syntax with `cyclonedx-py --help` before use.
 
 #### pip-audit (vulnerability scanning)
 ```bash
@@ -297,58 +298,7 @@ composer make-bom --output-file=sbom.json
 
 ## CI/CD Integration
 
-### GitHub Actions (Syft)
-
-```yaml
-name: Generate SBOM
-
-on:
-  release:
-    types: [published]
-  push:
-    branches: [main]
-
-permissions:
-  contents: write
-
-jobs:
-  sbom:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Generate SPDX SBOM with Syft
-        uses: anchore/sbom-action@v0
-        with:
-          format: spdx-json
-          output-file: sbom.spdx.json
-
-      - name: Upload SBOM as artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: sbom
-          path: |
-            sbom.spdx.json
-
-      # Optionally attach to release
-      - name: Upload to Release
-        if: github.event_name == 'release'
-        uses: softprops/action-gh-release@v1
-        with:
-          files: |
-            sbom.spdx.json
-```
-
-### GitHub Actions (Trivy)
-
-```yaml
-- name: Generate SBOM with Trivy
-  uses: aquasecurity/trivy-action@master
-  with:
-    scan-type: 'fs'
-    format: 'spdx-json'
-    output: 'sbom.spdx.json'
-```
+[`workflows/sbom-generation.yml.template`](../../workflows/sbom-generation.yml.template) is a pinned-action, **source-checkout** recipe. It publishes an explicitly named source SBOM; it does not pretend to inventory release binaries. Adapt the input to an actual built artifact or immutable image digest before claiming release inventory. Record the artifact digest, chosen Syft/SPDX versions, scan scope, and whether vulnerability findings are **advisory** (`fail-build: false`) or **blocking** under your documented policy. An advisory scan still fails on tool errors; do not suppress those errors. Publishing a release SBOM without this binding should not be described as proof of the shipped artifact's dependencies.
 
 ---
 
@@ -357,19 +307,17 @@ jobs:
 ### CycloneDX Validation
 
 ```bash
-# Install validator
-npm install -g @cyclonedx/cyclonedx-cli
-
-# Validate
+# With a compatible CycloneDX CLI installed, validate only the
+# optional secondary-format output, not the SPDX source SBOM.
 cyclonedx validate --input-file sbom.json
 ```
 
 ### SPDX Validation
 
 ```bash
-# Using SPDX tools
+# Using SPDX tools; validate the SPDX 2.3 JSON document
 pip install spdx-tools
-pyspdxtools parse sbom.spdx.json
+pyspdxtools -i sbom.spdx.json
 ```
 
 ### NTIA Minimum Elements Check
@@ -387,13 +335,13 @@ An SBOM should contain:
 
 ## Best Practices
 
-1. **Generate during build**: Create SBOM as part of CI/CD, not manually
-2. **Include with releases**: Attach SBOM to release artifacts
-3. **Version the SBOM**: Include version info in SBOM metadata
-4. **Sign the SBOM**: Use Sigstore or GPG to sign SBOM files
+1. **Select the scope**: Clearly distinguish source, build, and runtime inventories
+2. **Generate during build when claiming release scope**: Inventory the actual built asset or image by digest
+3. **Validate generator, schema and consumer**: Confirm Syft version, parse SPDX 2.3 and check downstream ingestion
+4. **Bind to the release**: Record the exact shipped artifact digest and publish the matching SBOM
 5. **Store historically**: Keep SBOMs for audit trails
 6. **Update regularly**: Regenerate when dependencies change
-7. **Prefer SPDX**: Generate SPDX by default; add CycloneDX only when a specific consumer (e.g., Dependency-Track) requires it
+7. **Prefer SPDX**: Generate SPDX 2.3 JSON by default; add CycloneDX only when a specific consumer (e.g., Dependency-Track) requires it. Sign later if your release policy calls for it.
 
 ---
 

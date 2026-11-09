@@ -1,91 +1,56 @@
-# SBOM Generation Workflow
-# This workflow generates Software Bill of Materials (SBOM) for your project.
-# SBOMs are generated in SPDX format.
-
-name: Generate SBOM
+# SPDX 2.3 *source checkout* inventory, not an inventory of built release assets.
+# To inventory shipped binaries/images, build first and scan the exact file or image digest.
+name: Generate source SBOM
 
 on:
   release:
     types: [published]
-
   push:
     branches: [main, master]
-
-  # Allow manual triggering
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  sbom:
-    name: Generate SBOM
+  source-sbom:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout code
-        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
-
-      # =======================================================
-      # Option 1: Use Syft (recommended for most projects)
-      # =======================================================
-      - name: Generate SPDX SBOM
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+        with:
+          persist-credentials: false
+      - name: Generate SPDX source SBOM
         uses: anchore/sbom-action@ab5d7b5f48981941c4c5d6bf33aeb98fe3bae38c # v0.15.10
         with:
+          path: .
           format: spdx-json
-          output-file: sbom.spdx.json
-
-      # =======================================================
-      # Option 2: Use Trivy (alternative, also does vuln scanning)
-      # Uncomment if you prefer Trivy
-      # =======================================================
-      # - name: Generate SBOM with Trivy
-      #   uses: aquasecurity/trivy-action@master
-      #   with:
-      #     scan-type: 'fs'
-      #     format: 'spdx-json'
-      #     output: 'sbom.trivy.spdx.json'
-
-      # =======================================================
-      # Upload as artifacts
-      # =======================================================
-      - name: Upload SBOM artifacts
-        uses: actions/upload-artifact@5d5d22a31266ced268874388b861e4b58bb5c2f3 # v4.3.1
-        with:
-          name: sbom
-          path: |
-            sbom.spdx.json
-          retention-days: 90
-
-      # =======================================================
-      # Attach to release
-      # =======================================================
-      - name: Upload SBOM to Release
-        if: github.event_name == 'release'
-        uses: softprops/action-gh-release@9d7c94cfd0a1f3ed45544c887983e9fa900f0564 # v2.0.4
-        with:
-          files: |
-            sbom.spdx.json
-
-      # =======================================================
-      # Optional: Scan SBOM for vulnerabilities
-      # =======================================================
-      - name: Scan SBOM for vulnerabilities
+          syft-version: v1.57.1
+          output-file: source-${{ github.sha }}.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+      - name: Advisory dependency scan
         uses: anchore/scan-action@3343887d815d7b07465f6fdcd395bd66508d486a # v3.6.4
         with:
-          sbom: sbom.spdx.json
-          fail-build: false  # Set to true to fail on vulnerabilities
+          sbom: source-${{ github.sha }}.spdx.json
+          fail-build: false
+      - uses: actions/upload-artifact@5d5d22a31266ced268874388b861e4b58bb5c2f3 # v4.3.1
+        with:
+          name: source-sbom
+          path: source-${{ github.sha }}.spdx.json
+          if-no-files-found: error
+          retention-days: 90
 
-      # =======================================================
-      # Optional: Upload to Dependency Track
-      # Uncomment and configure if you use Dependency Track.
-      # NOTE: Dependency-Track ingests CycloneDX only. If you use it, add a
-      # CycloneDX generation step (format: cyclonedx-json) and upload that file.
-      # =======================================================
-      # - name: Upload to Dependency Track
-      #   run: |
-      #     curl -X POST "${{ secrets.DEPENDENCY_TRACK_URL }}/api/v1/bom" \
-      #       -H "X-Api-Key: ${{ secrets.DEPENDENCY_TRACK_API_KEY }}" \
-      #       -H "Content-Type: multipart/form-data" \
-      #       -F "project=${{ github.repository }}" \
-      #       -F "bom=@sbom.cyclonedx.json"
+  release-source-sbom:
+    if: github.event_name == 'release'
+    needs: source-sbom
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@c850b930e6ba138125429b7e5c93fc707a7f8427 # v4.1.4
+        with:
+          name: source-sbom
+      - uses: softprops/action-gh-release@9d7c94cfd0a1f3ed45544c887983e9fa900f0564 # v2.0.4
+        with:
+          files: source-${{ github.sha }}.spdx.json
+          fail_on_unmatched_files: true
