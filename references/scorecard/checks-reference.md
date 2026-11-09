@@ -2,11 +2,16 @@
 
 OpenSSF Scorecard automatically assesses open source projects for security risks. Each check returns a score from 0-10 (higher is better) and a risk level.
 
+Start with one Scorecard CLI run; a GitHub workflow, Code Scanning, and public
+badge publishing are optional follow-ons. Triage dangerous workflows, exposed
+secrets, and known exploitable vulnerabilities before cosmetic score changes.
+An unavailable check or failed scan is not evidence of a safe project.
+
 ## Running Scorecard
 
 ```bash
 # Install scorecard
-go install github.com/ossf/scorecard/v5/cmd/scorecard@latest
+go install github.com/ossf/scorecard/v5/cmd/scorecard@v5.6.0
 
 # Run against a GitHub repository
 scorecard --repo=github.com/owner/repo
@@ -571,11 +576,16 @@ jobs:
 1. Check vulnerabilities:
 ```bash
 # Install osv-scanner
-go install github.com/google/osv-scanner/cmd/osv-scanner@latest
+go install github.com/google/osv-scanner/v2/cmd/osv-scanner@v2.7.1
 
 # Scan project
-osv-scanner -r .
+osv-scanner scan source --no-call-analysis=go -r .
 ```
+
+For OSV v2.7.1 source builds use Go 1.27.3+ as specified by its `go.mod`
+(its installation page still lists 1.26.2+); prebuilt release binaries avoid
+the source toolchain. See the [dependency scanning guide](../dependency-security/scanning-tools.md)
+for supported modes and untrusted-source precautions.
 
 2. Update vulnerable dependencies
 3. If no fix available, document in security advisory
@@ -626,38 +636,15 @@ def verify_webhook(payload, signature, secret):
 
 ### Automated Scanning Workflow
 
-Add this workflow to run Scorecard automatically:
-
-```yaml
-# .github/workflows/scorecard.yml
-name: Scorecard
-on:
-  schedule:
-    - cron: '0 6 * * 1'  # Weekly
-  push:
-    branches: [main]
-
-permissions: read-all
-
-jobs:
-  analysis:
-    runs-on: ubuntu-latest
-    permissions:
-      security-events: write
-      id-token: write
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - uses: ossf/scorecard-action@v2
-        with:
-          results_file: results.sarif
-          results_format: sarif
-          publish_results: true
-      - uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: results.sarif
-```
+Copy the [Scorecard workflow template](../../workflows/scorecard.yml.template)
+to `.github/workflows/scorecard.yml` and adjust default-branch names.
+It pins GHCR-compatible Scorecard Action v2.5.0. Publishing to the public
+Scorecard API requires `id-token: write` and the action's workflow restrictions;
+disable `publish_results` if you only need local results. SARIF upload requires
+Code Scanning and `security-events: write` (public repositories or licensed
+private repositories). Fork repositories are not supported by the action;
+manual-dispatch runs are experimental upstream. No badge or SARIF upload is
+necessary to run the CLI directly.
 
 ---
 

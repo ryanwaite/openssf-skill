@@ -16,32 +16,50 @@ Dependency vulnerabilities are a major attack vector. Regular scanning helps:
 
 ### OSV-Scanner (Recommended)
 
-Google's open-source vulnerability scanner using the OSV database.
+Google's open-source vulnerability scanner using the OSV database. Start with
+one local scan of your existing lockfiles; no GitHub integration or image
+registry is needed. OSV-Scanner v2.7.1 publishes binaries on its
+[releases page](https://github.com/google/osv-scanner/releases/tag/v2.7.1).
+For source installs, the published [installation guide](https://github.com/google/osv-scanner/blob/v2.7.1/docs/installation.md)
+says Go 1.26.2+, but the v2.7.1 `go.mod` declares **Go 1.27.3**; use 1.27.3+
+or the prebuilt binary, and check prerequisites for the selected release.
 
 ```bash
-# Install
-go install github.com/google/osv-scanner/cmd/osv-scanner@latest
+# Optional source install (Go 1.27.3+ for v2.7.1)
+go install github.com/google/osv-scanner/v2/cmd/osv-scanner@v2.7.1
 
-# Or via package managers
+# Or use a packaged binary on macOS (check installed version)
 brew install osv-scanner
 
-# Scan current directory
-osv-scanner -r .
+# Scan existing lockfiles and SBOMs in this directory (source is the default mode)
+osv-scanner scan source --recursive .
 
 # Scan specific lockfile
-osv-scanner --lockfile=package-lock.json
+osv-scanner scan source --lockfile=package-lock.json
 
 # Output as JSON
-osv-scanner -r . --format json > vulnerabilities.json
+osv-scanner scan source --recursive --format=json --output-file=vulnerabilities.json .
 
-# Scan SBOM
-osv-scanner --sbom=sbom.spdx.json
+# Scan an SPDX SBOM: the filename must end in .spdx.json (or another recognized SPDX suffix)
+osv-scanner scan source --lockfile=sbom.spdx.json
 
-# Experimental: fix suggestions
-osv-scanner fix --non-interactive --strategy=in-place -L package-lock.json
+# Image scanning is separate and optional; it may require Docker/registry access
+osv-scanner scan image myapp:1.0.0
+# Or scan a previously exported Docker archive without Docker
+osv-scanner scan image --archive ./myapp.tar
 ```
 
-**Supported ecosystems**: npm, pip, cargo, go, maven, gradle, nuget, composer, gem, pub, and more.
+**Scope and safety**: v2 automatically scans named SPDX files (`*.spdx.json`,
+`*.spdx`, `*.spdx.yml`, `*.spdx.rdf`, `*.spdx.rdf.xml`) and CycloneDX files
+(`bom.json`, `*.cdx.json`, `bom.xml`, `*.cdx.xml`). It skips the root Git
+repository by default; opt in with `--include-git-root`. Go call analysis is
+enabled by default and requires Go; add `--no-call-analysis=go` for untrusted
+or toolchain-free scans. Rust call analysis is experimental and executes
+dependency `build.rs` scripts; enable it only with explicit approval in an
+isolated environment, never on untrusted consume targets by default.
+`--offline-vulnerabilities` (with a previously downloaded database) and
+`--licenses` are optional; see the [v2 usage guide](https://github.com/google/osv-scanner/blob/v2.7.1/docs/usage.md).
+An execution failure is not a clean vulnerability result.
 
 ### Trivy
 
@@ -367,6 +385,15 @@ security-checker security:check composer.lock
 
 ### GitHub Actions with OSV-Scanner
 
+Optional: use OSV independently of GitHub Dependency Review. The latest
+published action workflow at this update is **v2.7.0** (the scanner itself is
+v2.7.1); the scanner's v2.7.1 docs reference a nonexistent action v2.7.1 tag.
+These are **job-level reusable workflows**, not a `uses` step. Full scans
+block on findings; set `fail-on-vuln: false` to make findings advisory without
+suppressing scanner errors. Set `upload-sarif: false` if Code Scanning is
+unavailable or the PR is from a fork without write permissions. The PR workflow
+reports *new* findings; the full workflow reports *all* findings.
+
 ```yaml
 name: Dependency Scan
 
@@ -375,29 +402,49 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  merge_group:
+    branches: [main]
   schedule:
-    - cron: '0 0 * * *'  # Daily
+    - cron: '0 0 * * 1'
+
+permissions:
+  contents: read
+  actions: read
+  security-events: write
 
 jobs:
-  scan:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+  scan-pr:
+    if: github.event_name == 'pull_request'
+    uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable-pr.yml@b1d267aea5211fa648d9d442fa64b90dbdcbdd36 # v2.7.0
+    with:
+      fail-on-vuln: true
+      upload-sarif: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
+      scan-args: |-
+        --no-call-analysis=go
+        --recursive
+        ./
 
-      - name: Run OSV-Scanner
-        uses: google/osv-scanner-action@v1
-        with:
-          scan-args: |-
-            --recursive
-            --format=sarif
-            --output=osv-results.sarif
-            .
-
-      - name: Upload SARIF
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: osv-results.sarif
+  scan-full:
+    if: github.event_name != 'pull_request'
+    uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@b1d267aea5211fa648d9d442fa64b90dbdcbdd36 # v2.7.0
+    with:
+      fail-on-vuln: true
+      upload-sarif: true
+      scan-args: |-
+        --no-call-analysis=go
+        --recursive
+        ./
 ```
+
+The PR diff workflow checks out the base and head and needs a full Git history;
+do not use it as a `merge_group` job (which has no PR base ref). The full job
+handles merge queues. If Code Scanning is unavailable, disable SARIF upload on
+**both** jobs and reduce their `security-events` permission as supported by
+your runner. Fork PRs do not receive write tokens. Both official reusable
+workflows upload short-lived artifacts even when SARIF upload is disabled;
+check their retention and your repository's data policy before enabling them.
+For a GitHub-only minimal start, use
+[Dependency Review](../../workflows/dependency-review.yml.template) alone.
 
 ### GitHub Dependabot
 
@@ -437,18 +484,22 @@ on: pull_request
 
 permissions:
   contents: read
-  pull-requests: write
 
 jobs:
   dependency-review:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/dependency-review-action@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
         with:
           fail-on-severity: moderate
-          deny-licenses: GPL-3.0
 ```
+
+This PR-only action needs the dependency graph/API (public repositories or
+licensed private repositories); v5 requires Actions Runner **2.327.1+** due
+to Node 24. PR comments are optional and require `pull-requests: write`,
+which is usually unavailable for fork PRs. If your merge queue requires
+a dependency check, use a separate full scan such as OSV's above.
 
 ---
 
@@ -514,3 +565,4 @@ Options in order of preference:
 - [GitHub Advisory Database](https://github.com/advisories)
 - [Snyk Vulnerability Database](https://snyk.io/vuln/)
 - [OpenSSF Package Analysis](https://github.com/ossf/package-analysis)
+- [OSV-Scanner v2 source, image, and GitHub workflows](https://github.com/google/osv-scanner/blob/v2.7.1/docs/usage.md)

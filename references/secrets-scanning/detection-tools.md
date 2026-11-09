@@ -2,6 +2,13 @@
 
 Leaked secrets (API keys, passwords, tokens, private keys) are one of the most common and impactful security incidents. This guide covers tools and practices for preventing, detecting, and responding to secret leaks.
 
+**Start now:** run `gitleaks git --redact .` in your repository to check
+committed history, or `gitleaks dir --redact .` to check the current files.
+The second command includes uncommitted files but not history. Neither
+requires enabling a hosted integration or another scanner. Treat a scanner
+error as *unknown*, not as a clean scan. A pattern match is not proof that
+a credential still works; do not make automated liveness requests to test it.
+
 ## Why Secrets Scanning Matters
 
 - **Automated bots** scan public GitHub commits within seconds of exposure
@@ -21,12 +28,13 @@ The best defense is preventing secrets from ever entering version control.
 # .pre-commit-config.yaml
 repos:
   - repo: https://github.com/gitleaks/gitleaks
-    rev: v8.21.2
+    rev: v8.30.1
     hooks:
       - id: gitleaks
 ```
 
-Install and run:
+Install and run (this staged hook is the simpler starting point; the optional
+TruffleHog filesystem hook below scans current files, including unstaged ones):
 
 ```bash
 # Install pre-commit
@@ -67,7 +75,8 @@ repos:
     rev: v3.82.13
     hooks:
       - id: trufflehog
-        entry: trufflehog git file://. --since-commit HEAD --only-verified
+        entry: trufflehog filesystem --no-verification --fail .
+        pass_filenames: false
 ```
 
 ---
@@ -78,7 +87,7 @@ repos:
 
 GitHub's built-in secret scanning is available for:
 - **Public repositories**: Free, automatic
-- **Private repositories**: Requires GitHub Advanced Security license
+- **Private repositories**: Check your plan and security feature availability
 
 Enable in repository settings:
 1. Go to **Settings → Code security and analysis**
@@ -117,10 +126,18 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.7
+      - uses: gitleaks/gitleaks-action@83373cf2f8c4db6e24b41c1a9b086bb9619e9cd3 # v2.3.7
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # For GitHub organizations only: configure the action license as a secret.
+          # GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
 ```
+
+The official action requires `GITLEAKS_LICENSE` for GitHub organizations,
+not personal accounts. If an action license is unavailable, install the OSS
+CLI and run `gitleaks git --redact .` instead. Scan full history with
+`fetch-depth: 0`; scope a PR range deliberately if a full scan is too costly.
+Do not upload unredacted findings as public artifacts.
 
 ### TruffleHog in CI
 
@@ -145,10 +162,17 @@ jobs:
           fetch-depth: 0
 
       - name: TruffleHog scan
-        uses: trufflesecurity/trufflehog@main
+        uses: trufflesecurity/trufflehog@1aa1871f9ae24a8c8a3a48a9345514acf42beb39 # v3.82.13
         with:
-          extra_args: --only-verified
+          version: '3.82.13' # the action otherwise pulls a mutable :latest image
+          extra_args: --no-verification
 ```
+
+TruffleHog verifies credentials by default, which may contact their providers.
+`--no-verification` disables those checks; simply removing `--only-verified`
+does **not** disable them. Run verification only with explicit authorization
+and appropriate isolation. TruffleHog can print raw findings: restrict CI log
+access and redact before sharing.
 
 ### GitLab CI
 
@@ -157,10 +181,12 @@ jobs:
 secrets-scanning:
   stage: test
   image:
-    name: zricethezav/gitleaks:latest
+    name: ghcr.io/gitleaks/gitleaks:v8.30.1
     entrypoint: [""]
+  variables:
+    GIT_DEPTH: "0"
   script:
-    - gitleaks detect --source . --verbose
+    - gitleaks git --redact .
   rules:
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
 ```
@@ -172,11 +198,11 @@ secrets-scanning:
 | Feature | Gitleaks | TruffleHog | detect-secrets | GitHub Secret Scanning |
 |---------|----------|------------|----------------|----------------------|
 | **Type** | Regex + entropy | Regex + verification | Regex + entropy | Cloud service |
-| **Verified results** | No | Yes (checks if secret is live) | No | Yes (partner alerts) |
+| **Verified results** | No | Optional provider checks (requires approval) | No | Some partner alerts |
 | **Pre-commit** | Yes | Yes | Yes | No (push protection only) |
 | **CI/CD** | Yes | Yes | Yes | Automatic |
 | **Custom rules** | Yes (.gitleaks.toml) | Yes (custom detectors) | Yes (plugins) | Yes (custom patterns) |
-| **Git history scan** | Yes | Yes | Yes | Yes |
+| **Git history scan** | Yes | Yes | No (file scan by default) | Yes |
 | **Language** | Go | Go | Python | Cloud |
 | **Cost** | Free (OSS) | Free (OSS) | Free (OSS) | Free public / GHAS private |
 | **Speed** | Fast | Moderate | Moderate | N/A |
@@ -191,43 +217,38 @@ secrets-scanning:
 # .gitleaks.toml
 title = "Gitleaks Configuration"
 
-# Custom rules
+[extend]
+useDefault = true
+
+# Custom rules supplement built-in rules rather than replacing them.
 [[rules]]
 id = "internal-api-key"
 description = "Internal API Key"
 regex = '''MYORG_[A-Za-z0-9]{32}'''
 tags = ["key", "internal"]
 
-# Allowlist specific files or paths
-[allowlist]
-paths = [
-  '''(^|/)\.env\.example$''',
-  '''(^|/)test/fixtures/''',
-  '''(^|/)docs/''',
-]
-
-# Allowlist specific patterns (false positives)
-regexes = [
-  '''EXAMPLE_[A-Z_]+''',
-  '''test-key-[a-z0-9]+''',
-]
 ```
+
+Avoid broad global path or regex allowlists: they can suppress actual
+credentials. Use a narrowly scoped, reviewed
+[`[[rules.allowlists]]`](https://github.com/gitleaks/gitleaks/blob/v8.30.1/README.md#configuration)
+for demonstrated false positives, and re-scan after changing it.
 
 ### TruffleHog Configuration
 
 ```bash
 # Scan current repo
-trufflehog git file://. --only-verified
+trufflehog git file://. --no-verification
 
-# Scan GitHub org
-trufflehog github --org=myorg --only-verified
-
-# Scan with JSON output
-trufflehog git file://. --json | jq .
+# Scanning a GitHub organization or verifying credential liveness requires
+# explicit authorization; do not run it automatically on untrusted sources.
 
 # Exclude paths
-trufflehog git file://. --exclude-paths=exclude.txt
+trufflehog git file://. --no-verification --exclude-paths=exclude.txt
 ```
+
+TruffleHog may print secret values; do not dump JSON findings into shared logs
+or artifacts. Restrict CI log access and redact findings before sharing.
 
 ```text
 # exclude.txt
@@ -309,7 +330,7 @@ docs/examples/
 - **Use short-lived credentials** (OIDC federation, temporary tokens) over long-lived keys
 - **Enable GitHub push protection** on all repositories
 - **Run pre-commit hooks** on every developer machine
-- **Scan the full Git history**, not just the current commit
+- **Scan the full Git history** and the current files when both scopes matter
 
 ### Don't
 
@@ -359,6 +380,7 @@ service-account*.json
 ## References
 
 - [Gitleaks](https://github.com/gitleaks/gitleaks)
+- [Gitleaks v8.30.1 commands and configuration](https://github.com/gitleaks/gitleaks/blob/v8.30.1/README.md#usage)
 - [TruffleHog](https://github.com/trufflesecurity/trufflehog)
 - [detect-secrets](https://github.com/Yelp/detect-secrets)
 - [GitHub Secret Scanning](https://docs.github.com/en/code-security/secret-scanning)

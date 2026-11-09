@@ -2,6 +2,11 @@
 
 Containers are a critical part of modern software delivery. Securing them requires attention at every stage: base image selection, build configuration, image scanning, runtime hardening, and registry security.
 
+Start with `hadolint Dockerfile` (if installed) or `trivy config Dockerfile`;
+neither needs a registry or image build. Build and scan the resulting image
+only when your project has a working container recipe. Pin images by digest
+after testing the final build and runtime together.
+
 ## Why Container Security Matters
 
 - Containers inherit vulnerabilities from their base images
@@ -56,8 +61,8 @@ CMD ["server.js"]
 ```
 
 ```dockerfile
-# Python application
-FROM python:3.13-slim AS builder
+# Python application: match the Debian 12 runtime's Python 3.11 and glibc ABI.
+FROM python:3.11-slim-bookworm AS builder
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir --target=/deps -r requirements.txt
@@ -80,8 +85,8 @@ FROM node:latest
 # Better - pinned major version
 FROM node:22-slim
 
-# Best - pinned by digest (immutable)
-FROM node:22-slim@sha256:abcdef1234567890...
+# For production, replace with the digest of the image you tested:
+# FROM node:22-slim@sha256:<verified-full-digest>
 ```
 
 ---
@@ -92,7 +97,7 @@ Multi-stage builds reduce image size and remove build-time secrets/tools from th
 
 ```dockerfile
 # Stage 1: Build
-FROM rust:1.83 AS builder
+FROM rust:1.83-bookworm AS builder
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 RUN mkdir src && echo "fn main() {}" > src/main.rs
@@ -180,7 +185,7 @@ RUN tar -xzf /app/app.tar.gz -C /app/ && rm /app/app.tar.gz
 # In docker-compose.yml or at runtime
 services:
   app:
-    image: myapp:latest
+    image: myapp:1.0.0
     read_only: true
     tmpfs:
       - /tmp
@@ -188,20 +193,20 @@ services:
 
 ```bash
 # Or via docker run
-docker run --read-only --tmpfs /tmp myapp:latest
+docker run --read-only --tmpfs /tmp myapp:1.0.0
 ```
 
 ### Drop Capabilities
 
 ```bash
 # Drop all capabilities, add only what's needed
-docker run --cap-drop=ALL --cap-add=NET_BIND_SERVICE myapp:latest
+docker run --cap-drop=ALL --cap-add=NET_BIND_SERVICE myapp:1.0.0
 ```
 
 ### Set Resource Limits
 
 ```bash
-docker run --memory=512m --cpus=1 --pids-limit=100 myapp:latest
+docker run --memory=512m --cpus=1 --pids-limit=100 myapp:1.0.0
 ```
 
 ---
@@ -266,18 +271,26 @@ jobs:
         run: docker build -t myapp:${{ github.sha }} .
 
       - name: Trivy vulnerability scan
-        uses: aquasecurity/trivy-action@18f2510ee396bbf400402947e7f3b0aba1c0a325 # v0.30.0
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # v0.35.0
         with:
           image-ref: myapp:${{ github.sha }}
           format: sarif
           output: trivy-results.sarif
           severity: CRITICAL,HIGH
+          # Advisory findings in Code Scanning; scanner execution errors still fail.
+          exit-code: '0'
 
       - name: Upload SARIF results
-        uses: github/codeql-action/upload-sarif@48ab28a6f5dbc2a99bf1e0131198dd8f1df78169 # v3.28.0
+        uses: github/codeql-action/upload-sarif@9418214df1f2c4b8128c770156c409013b07d6b9 # v3.39.3
         with:
           sarif_file: trivy-results.sarif
 ```
+
+For a blocking vulnerability gate, set Trivy's `exit-code: '1'` and arrange
+the SARIF upload to run after findings (but not after a failed scan with no
+results). SARIF upload requires `security-events: write` and Code Scanning
+availability; omit that step and permission for a simple local image scan.
+On fork PRs, token writes can be unavailable.
 
 ---
 
@@ -287,7 +300,7 @@ jobs:
 # docker-compose.yml
 services:
   app:
-    image: myapp:latest
+    image: myapp:1.0.0
     user: "1001:1001"
     read_only: true
     cap_drop:
@@ -303,12 +316,11 @@ services:
           cpus: '1.0'
     tmpfs:
       - /tmp:noexec,nosuid,nodev
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
 ```
+
+Distroless images do not contain `curl` or a shell. Use an application-provided
+healthcheck binary/command, or configure an external orchestrator HTTP probe;
+do not copy a `CMD curl` healthcheck into a distroless image.
 
 ---
 
@@ -332,8 +344,8 @@ cosign sign ghcr.io/myorg/myapp@sha256:abc123...
 
 ```bash
 # Scan images already in a registry
-trivy image ghcr.io/myorg/myapp:latest
-grype ghcr.io/myorg/myapp:latest
+trivy image ghcr.io/myorg/myapp:1.0.0
+grype ghcr.io/myorg/myapp:1.0.0
 ```
 
 ---
@@ -383,17 +395,15 @@ brew install hadolint
 # Lint a Dockerfile
 hadolint Dockerfile
 
-# Ignore specific rules
-hadolint --ignore DL3008 --ignore DL3009 Dockerfile
+# Review and document a narrowly scoped exception only when justified
 ```
 
 ```yaml
 # .hadolint.yaml
-ignored:
-  - DL3008  # Pin versions in apt-get install
+# Review any necessary exception individually rather than disabling pinning checks.
 trustedRegistries:
   - docker.io
-  - gcr.io
+  - ghcr.io
 ```
 
 GitHub Actions:
