@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "tag_exception": {
+    "repository": "slsa-framework/slsa-github-generator",
+    "path": ".github/workflows/generator_generic_slsa3.yml",
+    "version_pattern": "v[0-9]+\\.[0-9]+\\.[0-9]+",
+    "reason": "The SLSA verifier identifies the builder by the full semver workflow tag."
+  },
+  "runner_requirement": {
+    "repository": "actions/dependency-review-action",
+    "major_version": 5,
+    "minimum_runner": "2.327.1",
+    "reason": "Dependency Review v5 uses Node 24; use a current GitHub-hosted runner or verify this minimum on self-hosted runners."
+  },
+  "reference_workflows": {
+    "references/container-security/docker-guide.md": 1,
+    "references/dependency-security/scanning-tools.md": 2,
+    "references/scorecard/checks-reference.md": 4,
+    "references/scorecard/remediation-guide.md": 2,
+    "references/secrets-scanning/detection-tools.md": 2
+  },
+  "forbidden_refs": [
+    {
+      "repository": "google/osv-scanner-action",
+      "ref": "v1",
+      "reason": "OSV Scanner uses reusable job-level workflow paths, not this action ref."
+    },
+    {
+      "repository": "actions/dependency-review-action",
+      "ref": "9129d7d40b8c12c1ed0f60f5c3e9d0b76d9f7e1b",
+      "reason": "This SHA does not resolve."
+    },
+    {
+      "repository": "aquasecurity/trivy-action",
+      "ref": "18f2510ee396bbf400402947e7f3b0aba1c0a325",
+      "reason": "This SHA does not resolve."
+    },
+    {
+      "repository": "ossf/scorecard-action",
+      "ref": "62b2cac7ed8198b15735ed49ab1e5cf35480ba46",
+      "reason": "v2.4.0 references a retired GCR image; use v2.5.0 or later."
+    }
+  ]
+}
