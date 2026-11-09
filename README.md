@@ -155,7 +155,18 @@ python3 <installed-skill>/scripts/ensemble-eval.py --target /path/to/target --mo
 
 # Grade a repo you own
 python3 <installed-skill>/scripts/ensemble-eval.py --target /path/to/target --mode produce --format md
+
+# Save the available evidence, then replay it without invoking scanners
+python3 <installed-skill>/scripts/ensemble-eval.py --target /path/to/target --mode produce --snapshot-out audit-snapshot.json
+python3 <installed-skill>/scripts/ensemble-eval.py --replay audit-snapshot.json --format md
 ```
+
+`INCOMPLETE` is useful, nonfatal output: the report retains available findings,
+provisional results, gaps, and actions you can start now. For supported manual
+observations, add `--evidence observations.json`; the
+[audit evidence format](skills/audit/SKILL.md#manual-evidence-and-reproducibility)
+binds observations to the requested target and mode and distinguishes manual
+review from self-report. Importing evidence does not independently verify it.
 
 Only run this broader evaluation when requested. A `package@version` string
 alone is not currently resolved to an immutable package/lockfile by the runner;
@@ -171,6 +182,7 @@ verdict. The suite does **not** need to run to produce one useful advisor action
 | Scorecard, OSV and Gitleaks via audit runner | CLI adapters for suitable targets when installed; verify invocation and result coverage | No |
 | Local repository metadata / CODEOWNERS | Partial indicators, not verified review enforcement | No |
 | SBOM, signing/provenance, Baseline conformance, threat coverage | References and manual work; check current runner output for `unknown` rather than claiming an integrated verified probe | No |
+| Manual evidence and offline replay | Versioned, target-bound observations and snapshots; imported claims are not independently verified | No |
 | Package coordinate resolution, centralized/default forge controls | Not verified by local detector; unsupported without independent evidence | No |
 
 Audit evidence can require optional scanners, a resolvable repository/lockfile,
