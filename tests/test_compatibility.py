@@ -3,6 +3,7 @@
 import importlib.util
 import json
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -78,6 +79,15 @@ class TestCompatibility(unittest.TestCase):
         ])
         self.assertEqual(notes, [])
 
+    def test_direct_gitlab_yaml_is_validated_not_silently_skipped(self):
+        template = self.root / "workflows" / "gitlab-ci-security.yml.template"
+        template.write_text("stages: [test]\nscan:\n  stage: test\n  script: echo ok\n")
+        counts, _, _, _ = compat.check_offline(self.root)
+        self.assertEqual(counts["gitlab"], 1)
+        template.write_text("stages: [test]\nscan:\n  stage: test\n")
+        with self.assertRaisesRegex(compat.ValidationError, "needs a script"):
+            compat.check_offline(self.root)
+
     def test_inventory_fails_if_runnable_example_disappears(self):
         (self.root / "references" / "guide.md").write_text("# No workflow here\n")
         with self.assertRaisesRegex(compat.ValidationError, "inventory changed"):
@@ -116,7 +126,8 @@ class TestCompatibility(unittest.TestCase):
                     compat.check_offline(self.root)
 
     def test_rejects_unavailable_action_and_unpinned_template(self):
-        for ref in ("google/osv-scanner-action@v1", "actions/checkout@v4"):
+        for ref in ("google/osv-scanner-action@v1",
+                    "google/osv-scanner-action@v2.7.1", "actions/checkout@v4"):
             with self.subTest(ref=ref):
                 (self.root / "workflows" / "example.yml.template").write_text(
                     GITHUB.replace(
@@ -179,6 +190,34 @@ class TestCompatibility(unittest.TestCase):
             errors, count = compat.check_live(refs, None)
         self.assertEqual(count, 1)
         self.assertIn("UNKNOWN (HTTP 404)", errors[0])
+
+    def test_sso_restricted_api_checks_tag_and_action_path_without_claiming_api_success(self):
+        from urllib.error import HTTPError
+        ref = ("github/codeql-action", "/upload-sarif", "9418214df1f2c4b8128c770156c409013b07d6b9")
+        denied = HTTPError("", 403, "", {"X-GitHub-SSO": "required"}, None)
+        with patch.object(compat, "github_json", side_effect=denied), \
+             patch.object(compat, "git_tag_sha", return_value=ref[2]) as tag, \
+             patch.object(compat, "raw_path_exists", return_value=True) as path:
+            errors, count = compat.check_live({ref: "v3.39.3"}, None)
+        self.assertEqual((errors, count), ([], 1))
+        tag.assert_called_once()
+        path.assert_called_once()
+
+        with patch.object(compat, "github_json", side_effect=denied), \
+             patch.object(compat, "git_tag_sha", return_value="0" * 40):
+            errors, _ = compat.check_live({ref: "v3.39.3"}, None)
+        self.assertIn("SSO required, fallback unverified", errors[0])
+
+    def test_annotated_tag_fallback_resolves_peeled_commit(self):
+        response = subprocess.CompletedProcess(
+            [], 0, "0" * 40 + "\trefs/tags/v3.39.3\n"
+            + "9" * 40 + "\trefs/tags/v3.39.3^{}\n", ""
+        )
+        with patch.object(compat.subprocess, "run", return_value=response):
+            self.assertEqual(
+                compat.git_tag_sha("github/codeql-action", "v3.39.3", lambda: None),
+                "9" * 40,
+            )
 
 
 class TestExtractionWithoutTooling(unittest.TestCase):

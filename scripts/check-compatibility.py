@@ -7,8 +7,10 @@ PyYAML is only needed for this maintainer/CI check, not for using the skill.
 import argparse
 from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
 import re
+import subprocess
 import sys
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
@@ -50,7 +52,7 @@ def yaml_blocks(text, source):
 
 
 def examples(root, excluded=None):
-    """Yield template YAML, GitLab fenced YAML, and runnable reference workflows."""
+    """Yield direct templates, any fenced GitLab YAML, and runnable reference workflows."""
     templates = sorted((root / "workflows").glob("*.yml.template"))
     if not templates:
         raise ValidationError("no workflow templates found")
@@ -58,10 +60,11 @@ def examples(root, excluded=None):
         text = path.read_text(encoding="utf-8")
         if path.name.startswith("gitlab-"):
             blocks = yaml_blocks(text, path.relative_to(root))
-            if not blocks:
-                raise ValidationError(f"{path.relative_to(root)}: no YAML fences")
-            for line, block in blocks:
-                yield str(path.relative_to(root)), line, block, "gitlab"
+            if blocks:
+                for line, block in blocks:
+                    yield str(path.relative_to(root)), line, block, "gitlab"
+            else:
+                yield str(path.relative_to(root)), 1, text, "gitlab"
         else:
             yield str(path.relative_to(root)), 1, text, "github-template"
     for path in sorted((root / "references").rglob("*.md")):
@@ -247,29 +250,91 @@ def github_json(path, token):
         return json.load(response)
 
 
+def git_tag_sha(repo, tag, budget):
+    budget()
+    result = subprocess.run(
+        ["git", "-c", "credential.helper=", "ls-remote", "--tags", "--exit-code",
+         f"https://github.com/{repo}.git", f"refs/tags/{tag}", f"refs/tags/{tag}^{{}}"],
+        capture_output=True, text=True, timeout=5, check=False,
+        env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+    )
+    if result.returncode:
+        return None
+    tag_refs = {ref: sha for sha, ref in
+                (line.split("\t", 1) for line in result.stdout.splitlines())}
+    return tag_refs.get(f"refs/tags/{tag}^{{}}") or tag_refs.get(f"refs/tags/{tag}")
+
+
+def raw_path_exists(repo, path, tag, budget):
+    paths = [path.lstrip("/")]
+    if not path.endswith((".yml", ".yaml")):
+        paths = [paths[0] + "/action.yml", paths[0] + "/action.yaml"]
+    for candidate in paths:
+        budget()
+        request = Request(
+            f"https://raw.githubusercontent.com/{repo}/{quote(tag, safe='')}/"
+            f"{quote(candidate, safe='/')}",
+            headers={"User-Agent": "openssf-skill-compatibility-check"},
+        )
+        try:
+            with urlopen(request, timeout=5) as response:
+                response.read(1)
+            return True
+        except HTTPError as exc:
+            if exc.code != 404:
+                raise
+    return False
+
+
 def check_live(refs, token):
     """Resolve each template ref; check version comments and reusable workflow paths."""
     checks = set()
     for (repo, path, revision), tag in refs.items():
         checks.add((repo, path, revision, tag))
-    requests = sum(1 + bool(path) + bool(tag) for _, path, _, tag in checks)
-    if requests > MAX_REQUESTS:
-        raise ValidationError(f"live checks exceed the {MAX_REQUESTS}-request bound")
+    calls = 0
+
+    def budget():
+        nonlocal calls
+        if calls >= MAX_REQUESTS:
+            raise ValidationError(f"live checks exceeded the {MAX_REQUESTS}-request bound")
+        calls += 1
+
+    def lookup(path):
+        budget()
+        return github_json(path, token)
+
     errors = []
     for repo, path, revision, tag in sorted(checks, key=str):
         prefix = f"/repos/{repo}"
         try:
-            commit = github_json(f"{prefix}/commits/{quote(revision, safe='')}", token)
+            commit = lookup(f"{prefix}/commits/{quote(revision, safe='')}")
             if SHA.fullmatch(revision) and commit["sha"] != revision:
                 errors.append(f"{repo}@{revision}: resolved SHA mismatch")
             if tag:
-                tagged = github_json(f"{prefix}/commits/{quote(tag, safe='')}", token)
+                tagged = lookup(f"{prefix}/commits/{quote(tag, safe='')}")
                 if tagged["sha"] != commit["sha"]:
                     errors.append(f"{repo}@{revision}: comment {tag} resolves to {tagged['sha']}")
             if path:
-                github_json(f"{prefix}/contents/{quote(path.lstrip('/'), safe='/')}?ref={quote(revision, safe='')}", token)
+                lookup(f"{prefix}/contents/{quote(path.lstrip('/'), safe='/')}?ref={quote(revision, safe='')}")
+        except ValidationError:
+            raise
         except (HTTPError, URLError, TimeoutError, KeyError, ValueError) as exc:
+            fallback_failure = None
+            if isinstance(exc, HTTPError) and exc.code == 403 and (
+                exc.headers.get("X-GitHub-SSO", "").startswith("required")
+            ):
+                fallback_tag = tag or (revision if re.fullmatch(r"v\d+\.\d+\.\d+", revision) else None)
+                if fallback_tag:
+                    try:
+                        sha = git_tag_sha(repo, fallback_tag, budget)
+                        if sha and (not SHA.fullmatch(revision) or sha == revision):
+                            if not path or raw_path_exists(repo, path, fallback_tag, budget):
+                                continue
+                    except (OSError, URLError, subprocess.TimeoutExpired) as fallback_exc:
+                        fallback_failure = type(fallback_exc).__name__
             detail = f"HTTP {exc.code}" if isinstance(exc, HTTPError) else type(exc).__name__
+            if isinstance(exc, HTTPError) and exc.headers.get("X-GitHub-SSO", "").startswith("required"):
+                detail += f"; GitHub SSO required, fallback {fallback_failure or 'unverified'}"
             errors.append(f"{repo}{path or ''}@{revision}: live lookup UNKNOWN ({detail})")
     return errors, len(checks)
 
@@ -289,7 +354,6 @@ def main(argv=None):
         if not args.live:
             print("Live ref availability: NOT RUN (scheduled/manual check only)")
             return 0
-        import os
         checked_at = datetime.now(timezone.utc).isoformat()
         errors, count = check_live(refs, os.environ.get("GITHUB_TOKEN"))
         print(f"Live GitHub ref checks at {checked_at}: {count} refs, "
