@@ -24,10 +24,13 @@ Output: fused JSON (default) or a Markdown report (``--format md``).
 """
 
 import argparse
+from datetime import datetime, timezone
 import json
+import math
+import re
 import shutil
 import subprocess
-import sys
+import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -54,12 +57,17 @@ MODE_WEIGHTS: Dict[str, Dict[str, float]] = {
 }
 
 SEVERITY_DEDUCTION = {"CRITICAL": 40, "HIGH": 20, "MEDIUM": 8, "LOW": 2}
+SCHEMA_VERSION = 1
+POLICY_VERSION = "1"
 
 
 # --- Signal helper -----------------------------------------------------------
 
 def signal(name: str, status: str, subscore: Optional[float],
-           confidence: str, finding: str, raw: Any = None) -> Dict[str, Any]:
+           confidence: str, finding: str, raw: Any = None,
+           evidence_type: str = "observation", source: str = "",
+           captured_at: Optional[str] = None,
+           tool: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
     """Build a normalized signal record."""
     return {
         "name": name,
@@ -68,11 +76,24 @@ def signal(name: str, status: str, subscore: Optional[float],
         "confidence": confidence,   # high | medium | low
         "finding": finding,
         "raw": raw,
+        "evidence_type": evidence_type,
+        "source": source or name,
+        "captured_at": captured_at,
+        "tool": tool,
     }
 
 
 def _have(tool: str) -> bool:
     return shutil.which(tool) is not None
+
+
+def _tool_version(tool: str) -> str:
+    proc = _run([tool, "--version"], timeout=10)
+    if proc and proc.returncode == 0:
+        match = re.search(r"\bv?\d+\.\d+(?:\.\d+)?\b", proc.stdout[:256])
+        if match:
+            return match.group()
+    return "unrecorded"
 
 
 def _run(cmd: List[str], timeout: int = 180) -> Optional[subprocess.CompletedProcess]:
@@ -99,7 +120,11 @@ def probe_scorecard(target: str, is_repo: bool) -> Dict[str, Any]:
                       "Scorecard execution failed.")
     try:
         data = json.loads(proc.stdout)
-        agg = float(data.get("score", 0))
+        if not isinstance(data, dict) or "score" not in data:
+            raise ValueError("Missing aggregate")
+        agg = float(data["score"])
+        if not math.isfinite(agg) or not 0 <= agg <= 10:
+            raise ValueError("Invalid aggregate")
     except (json.JSONDecodeError, ValueError, TypeError):
         return signal("scorecard", "error", None, "low",
                       "Could not parse Scorecard output.")
@@ -107,49 +132,175 @@ def probe_scorecard(target: str, is_repo: bool) -> Dict[str, Any]:
                   f"Scorecard aggregate {agg}/10.", raw={"aggregate": agg})
 
 
+def _severity(vuln: Dict[str, Any]) -> Optional[str]:
+    """Use published severity buckets or numeric CVSS, never guess from a vector."""
+    buckets = []
+    severities = vuln.get("severity", [])
+    if not isinstance(severities, list):
+        raise ValueError("Invalid severity list")
+    for item in severities:
+        if not isinstance(item, dict):
+            continue
+        value = item.get("score")
+        if item.get("type") in ("CVSS_V2", "CVSS_V3", "CVSS_V4") and (
+                isinstance(value, (int, float)) or (
+                    isinstance(value, str) and value.replace(".", "", 1).isdigit())):
+            number = float(value)
+            if math.isfinite(number) and 0 <= number <= 10:
+                buckets.append("CRITICAL" if item["type"] != "CVSS_V2" and number >= 9
+                               else "HIGH" if number >= 7 else "MEDIUM" if number >= 4
+                               else "LOW")
+    for field in ("database_specific", "ecosystem_specific"):
+        detail = vuln.get(field) or {}
+        if isinstance(detail, dict):
+            bucket = detail.get("severity")
+            if isinstance(bucket, str) and bucket.upper() in SEVERITY_DEDUCTION:
+                buckets.append(bucket.upper())
+    return max(buckets, key=lambda bucket: SEVERITY_DEDUCTION[bucket]) if buckets else None
+
+
+def _affected_ranges(vuln: Dict[str, Any]) -> List[Dict[str, Any]]:
+    ranges_out = []
+    affected_list = vuln.get("affected", [])
+    if not isinstance(affected_list, list):
+        raise ValueError("Invalid affected list")
+    for affected in affected_list:
+        if not isinstance(affected, dict):
+            continue
+        ranges = affected.get("ranges", [])
+        if not isinstance(ranges, list):
+            raise ValueError("Invalid ranges")
+        for item in ranges:
+            if not isinstance(item, dict):
+                continue
+            if not isinstance(item.get("type", "unknown"), str):
+                raise ValueError("Invalid range type")
+            events = item.get("events", [])
+            if not isinstance(events, list):
+                raise ValueError("Invalid events")
+            normalized = []
+            for event in events:
+                if not isinstance(event, dict):
+                    raise ValueError("Invalid range event")
+                for key in ("introduced", "last_affected", "fixed"):
+                    if key in event:
+                        if not isinstance(event[key], str):
+                            raise ValueError("Invalid affected version")
+                        normalized.append({key: event[key]})
+            ranges_out.append({"type": item.get("type", "unknown"), "events": normalized})
+    return ranges_out
+
+
+def _osv_findings(data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Collapse overlapping aliases/groups per package version across sources."""
+    records: Dict[tuple, List[Dict[str, Any]]] = {}
+    for result in data["results"]:
+        if not isinstance(result, dict) or not isinstance(result.get("packages"), list):
+            raise ValueError("Invalid result")
+        source = result.get("source")
+        if not isinstance(source, dict) or not isinstance(source.get("path"), str):
+            raise ValueError("Missing source")
+        for entry in result["packages"]:
+            if not isinstance(entry, dict) or not isinstance(entry.get("package"), dict) \
+                    or not isinstance(entry.get("vulnerabilities"), list):
+                raise ValueError("Invalid package")
+            pkg = entry["package"]
+            if not all(isinstance(pkg.get(k), str) and pkg[k]
+                       for k in ("name", "version", "ecosystem")):
+                raise ValueError("Missing package identity")
+            groups = entry.get("groups", [])
+            if not isinstance(groups, list):
+                raise ValueError("Invalid groups")
+            group_ids = []
+            for group in groups:
+                if not isinstance(group, dict) or not isinstance(group.get("ids"), list):
+                    raise ValueError("Invalid group")
+                group_ids.append(set(group["ids"]))
+            key = (pkg["ecosystem"], pkg["name"], pkg["version"])
+            bucket = records.setdefault(key, [])
+            for vuln in entry["vulnerabilities"]:
+                if not isinstance(vuln, dict) or not isinstance(vuln.get("id"), str) \
+                        or not vuln["id"] or not isinstance(vuln.get("aliases", []), list):
+                    raise ValueError("Missing advisory identity")
+                ids = {vuln["id"], *vuln.get("aliases", [])}
+                if not all(isinstance(i, str) and i for i in ids):
+                    raise ValueError("Invalid alias")
+                for group in group_ids:
+                    if ids & group:
+                        ids.update(group)
+                severity = _severity(vuln)
+                affected = _affected_ranges(vuln)
+                fixes = [event["fixed"] for item in affected for event in item["events"]
+                         if "fixed" in event]
+                matching = [r for r in bucket if ids & set(r["aliases"])]
+                for old in matching:
+                    ids.update(old["aliases"])
+                    fixes.extend(old["fixed_versions"])
+                    affected.extend(old["affected_ranges"])
+                    severity = max((x for x in (severity, old["severity"]) if x),
+                                   key=lambda x: SEVERITY_DEDUCTION[x], default=None)
+                    bucket.remove(old)
+                paths = {source["path"]}
+                for old in matching:
+                    paths.update(old["paths"])
+                bucket.append({"id": sorted(ids)[0], "aliases": sorted(ids),
+                               "ecosystem": key[0], "package": key[1],
+                               "version": key[2], "severity": severity,
+                               "fixed_versions": sorted(set(fixes)),
+                               "fix_status": "available" if fixes else "unknown",
+                               "affected_ranges": [json.loads(item) for item in sorted(
+                                   {json.dumps(item, sort_keys=True) for item in affected})],
+                               "paths": sorted(paths)})
+    return sorted((r for bucket in records.values() for r in bucket),
+                  key=lambda r: (r["ecosystem"], r["package"], r["version"], r["id"]))
+
+
 def probe_known_vulns(target: str, is_local: bool) -> Dict[str, Any]:
+    if not is_local:
+        return signal("known_vulns", "unknown", None, "low",
+                      "OSV source scan needs a local checkout; package/repo resolution is not supported.")
     if not _have("osv-scanner"):
         return signal("known_vulns", "unknown", None, "low",
                       "OSV-Scanner not installed.")
-    arg = ["osv-scanner", "--format=json"]
-    arg += (["--recursive", target] if is_local else ["--lockfile", target])
-    proc = _run(arg)
-    if not proc or not proc.stdout.strip():
-        return signal("known_vulns", "unknown", None, "low",
-                      "OSV-Scanner produced no output.")
+    proc = _run(["osv-scanner", "scan", "source", "--format=json",
+                 "--no-call-analysis=go", "--recursive", target])
+    if proc is None or proc.returncode not in (0, 1) or not proc.stdout.strip():
+        return signal("known_vulns", "error", None, "low",
+                      "OSV-Scanner failed or produced no JSON; no clean result inferred.")
     counts = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0}
     try:
         data = json.loads(proc.stdout)
-        for res in data.get("results", []):
-            for pkg in res.get("packages", []):
-                for vuln in pkg.get("vulnerabilities", []):
-                    sev = _osv_severity(vuln)
-                    counts[sev] = counts.get(sev, 0) + 1
-    except (json.JSONDecodeError, TypeError):
+        if not isinstance(data, dict) or not isinstance(data.get("results"), list):
+            raise ValueError("Missing results")
+        findings = _osv_findings(data)
+        if not any(result["packages"] for result in data["results"]):
+            return signal("known_vulns", "unknown", None, "low",
+                          "OSV-Scanner reported no scanned package sources; coverage unknown.",
+                          source="OSV-Scanner")
+        if (proc.returncode == 0 and findings) or (proc.returncode == 1 and not findings):
+            raise ValueError("Exit/output mismatch")
+        for finding in findings:
+            if finding["severity"]:
+                counts[finding["severity"]] += 1
+    except (json.JSONDecodeError, TypeError, ValueError, KeyError):
         return signal("known_vulns", "error", None, "low",
-                      "Could not parse OSV-Scanner output.")
+                      "OSV-Scanner exit status or JSON structure invalid; no clean result inferred.")
     score = 100
     for sev, n in counts.items():
-        score -= SEVERITY_DEDUCTION[sev] * n
+        score -= sum(SEVERITY_DEDUCTION[sev] *
+                     (2 if finding["fixed_versions"] else 1)
+                     for finding in findings if finding["severity"] == sev)
     score = max(0, score)
-    total = sum(counts.values())
-    return signal("known_vulns", "ok", score, "high",
-                  f"{total} known vulns ({counts['CRITICAL']}C/{counts['HIGH']}H/"
-                  f"{counts['MEDIUM']}M/{counts['LOW']}L).", raw=counts)
-
-
-def _osv_severity(vuln: Dict[str, Any]) -> str:
-    """Best-effort CVSS/severity bucket from an OSV vuln record."""
-    for sev in vuln.get("severity", []):
-        score = str(sev.get("score", ""))
-        # CVSS vector or numeric — coarse bucket
-        if "CRITICAL" in score.upper():
-            return "CRITICAL"
-    db = (vuln.get("database_specific") or {}).get("severity", "")
-    db = str(db).upper()
-    if db in SEVERITY_DEDUCTION:
-        return db
-    return "MEDIUM"
+    unknown = len(findings) - sum(counts.values())
+    return signal("known_vulns", "ok" if not unknown else "unknown",
+                  score if not unknown else None, "high" if not unknown else "low",
+                  f"{len(findings)} advisory group(s) ({counts['CRITICAL']}C/"
+                  f"{counts['HIGH']}H/{counts['MEDIUM']}M/{counts['LOW']}L/"
+                  f"{unknown} unknown severity); "
+                  + ("verify unknown severities before scoring." if unknown else
+                     "Severity and fix data from OSV-Scanner."),
+                  raw={"counts": counts, "findings": findings},
+                  source="OSV-Scanner", tool={"name": "osv-scanner", "version": "unrecorded"})
 
 
 def probe_secrets(target: str, is_local: bool) -> Dict[str, Any]:
@@ -159,32 +310,47 @@ def probe_secrets(target: str, is_local: bool) -> Dict[str, Any]:
     if not _have("gitleaks"):
         return signal("secrets", "unknown", None, "low",
                       "Gitleaks not installed.")
-    proc = _run(["gitleaks", "detect", "--source", target,
-                 "--report-format", "json", "--report-path", "/dev/stdout",
-                 "--no-banner"])
-    if proc is None:
-        return signal("secrets", "unknown", None, "low", "Gitleaks failed to run.")
-    # gitleaks exits non-zero when leaks are found
-    findings = []
-    if proc.stdout.strip():
-        try:
-            findings = json.loads(proc.stdout)
-        except json.JSONDecodeError:
-            findings = []
-    if findings:
-        return signal("secrets", "ok", 0, "high",
-                      f"{len(findings)} potential secret(s) detected — verify "
-                      f"liveness immediately.", raw={"count": len(findings)})
-    return signal("secrets", "ok", 100, "high", "No secrets detected by Gitleaks.")
+    scopes = ["dir"]
+    if (Path(target) / ".git").exists():
+        scopes.insert(0, "git")
+    counts = {}
+    with tempfile.TemporaryDirectory(prefix="openssf-gitleaks-") as temp:
+        for scope in scopes:
+            report_path = Path(temp) / f"{scope}.json"
+            proc = _run(["gitleaks", scope, "--redact=100", "--report-format", "json",
+                         "--report-path", str(report_path), "--no-banner", target])
+            if proc is None or proc.returncode not in (0, 1) or \
+                    "partial scan" in proc.stderr.lower() or \
+                    "failed to scan" in proc.stderr.lower():
+                return signal("secrets", "error", None, "low",
+                              f"Gitleaks {scope} scan failed; no clean result inferred.")
+            try:
+                findings = json.loads(report_path.read_text(encoding="utf-8"))
+                if findings is None and proc.returncode == 0:
+                    findings = []  # Gitleaks serializes a nil clean slice as JSON null.
+                if not isinstance(findings, list) or not all(isinstance(x, dict) for x in findings):
+                    raise ValueError("Invalid report")
+                if (proc.returncode == 0 and findings) or (proc.returncode == 1 and not findings):
+                    raise ValueError("Exit/report mismatch")
+            except (OSError, ValueError, json.JSONDecodeError):
+                return signal("secrets", "error", None, "low",
+                              f"Gitleaks {scope} report missing, malformed, or inconsistent.")
+            counts[scope] = len(findings)
+    count = sum(counts.values())
+    return signal("secrets", "ok", 50 if count else 100, "medium",
+                  f"{count} potential secret finding(s) across {', '.join(scopes)}; "
+                  + ("verify and rotate if live." if count else "no findings in scanned scopes."),
+                  raw={"potential_count": count, "scopes": counts, "verified_live": False},
+                  source="Gitleaks", tool={"name": "gitleaks", "version": "unrecorded"})
 
 
 def probe_maintenance(target: str, is_local: bool) -> Dict[str, Any]:
     """Use git history (local) or gh API (repo) to gauge activity."""
     if is_local and (Path(target) / ".git").exists():
         proc = _run(["git", "-C", target, "log", "-1", "--format=%ct"])
-        if proc and proc.stdout.strip().isdigit():
+        if proc and proc.returncode == 0 and proc.stdout.strip().isdigit():
             import time
-            age_days = (time.time() - int(proc.stdout.strip())) / 86400
+            age_days = max(0, (time.time() - int(proc.stdout.strip())) / 86400)
             if age_days <= 90:
                 return signal("maintenance", "ok", 100, "medium",
                               f"Last commit {int(age_days)}d ago.")
@@ -197,15 +363,21 @@ def probe_maintenance(target: str, is_local: bool) -> Dict[str, Any]:
         repo = target.replace("https://github.com/", "").rstrip("/")
         proc = _run(["gh", "api", f"repos/{repo}", "--jq",
                      "{archived:.archived, pushed:.pushed_at}"])
-        if proc and proc.stdout.strip():
+        if proc and proc.returncode == 0 and proc.stdout.strip():
             try:
                 meta = json.loads(proc.stdout)
+                if not isinstance(meta, dict) or type(meta.get("archived")) is not bool:
+                    raise ValueError("Invalid metadata")
                 if meta.get("archived"):
                     return signal("maintenance", "ok", 0, "high",
                                   "Repository is ARCHIVED.", raw=meta)
-                return signal("maintenance", "ok", 90, "medium",
-                              f"Last push {meta.get('pushed')}.", raw=meta)
-            except json.JSONDecodeError:
+                pushed = _utc(meta["pushed"])
+                age = max(0, (datetime.now(timezone.utc) - pushed).days)
+                score = 100 if age <= 90 else 75 if age <= 365 else 50
+                return signal("maintenance", "ok", score, "low",
+                              f"Last push {age}d ago (release cadence and bus factor unverified).",
+                              raw=meta, source="GitHub API")
+            except (json.JSONDecodeError, KeyError, ValueError, TypeError):
                 pass
     return signal("maintenance", "unknown", None, "low",
                   "Could not determine maintenance signals.")
@@ -215,7 +387,7 @@ def _placeholder(name: str, hint: str) -> Dict[str, Any]:
     """Probes whose tooling integration is environment-specific.
 
     These return `unknown` by default so the agent knows to run them manually
-    and feed results back; they are intentionally honest about being un-run
+    or import a structured observation with --evidence; they remain un-run
     rather than fabricating a score.
     """
     return signal(name, "unknown", None, "low", hint)
@@ -224,23 +396,23 @@ def _placeholder(name: str, hint: str) -> Dict[str, Any]:
 def probe_supply_chain(target: str) -> Dict[str, Any]:
     return _placeholder("supply_chain",
                         "Generate an SPDX SBOM (syft/spdx-sbom-generator) and assess "
-                        "transitive risk; feed the count back in.")
+                        "transitive risk; import counts with --evidence.")
 
 
 def probe_provenance(target: str) -> Dict[str, Any]:
     return _placeholder("provenance",
                         "Check SLSA level and verify signatures with "
-                        "`cosign verify`; record the level.")
+                        "`cosign verify`; import the observed level with --evidence.")
 
 
 def probe_baseline(target: str) -> Dict[str, Any]:
     return _placeholder("baseline",
-                        "Score OSPS Baseline L1 controls met / total.")
+                        "Assess versioned OSPS Baseline controls; import met / total with --evidence.")
 
 
 def probe_threat_coverage(target: str) -> Dict[str, Any]:
     return _placeholder("threat_coverage",
-                        "Confirm a current STRIDE threat model exists.")
+                        "Review STRIDE threat model coverage; import observation with --evidence.")
 
 
 def probe_code_review(target: str, is_local: bool) -> Dict[str, Any]:
@@ -259,9 +431,20 @@ def probe_code_review(target: str, is_local: bool) -> Dict[str, Any]:
 
 def fuse(signals: List[Dict[str, Any]], mode: str) -> Dict[str, Any]:
     weights = MODE_WEIGHTS[mode]
+    names = [s["name"] for s in signals]
+    if len(set(names)) != len(names) or any(name not in weights for name in names):
+        raise ValueError("Signals must have unique, mode-applicable names")
+    for s in signals:
+        score = s["subscore"]
+        if s["status"] not in ("ok", "unknown", "error") or \
+                (s["status"] == "ok") != (score is not None):
+            raise ValueError("Invalid signal status/score")
+        if score is not None and (isinstance(score, bool) or
+                                  not isinstance(score, (int, float)) or
+                                  not math.isfinite(score) or not 0 <= score <= 100):
+            raise ValueError("Signal subscore outside 0-100")
     usable = [s for s in signals
-              if s["status"] == "ok" and s["name"] in weights
-              and s["subscore"] is not None]
+              if s["status"] == "ok"]
     active_weight = sum(weights[s["name"]] for s in usable)
 
     if active_weight == 0:
@@ -285,8 +468,14 @@ def fuse(signals: List[Dict[str, Any]], mode: str) -> Dict[str, Any]:
         if capped is not None and capped > ceiling:
             capped, cap_label = ceiling, esc["rule"]
 
-    outcome = _outcome(capped, mode, escalations)
-    confidence = _confidence(active_weight, base)
+    provisional = _outcome(capped, mode, escalations)
+    complete = len(signals) == len(weights) and all(s["status"] == "ok" for s in signals)
+    # Missing evidence must not turn a renormalized average into a positive verdict.
+    blocking = bool(escalations) and (
+        (mode == "consume" and provisional == "Avoid") or
+        (mode == "produce" and provisional == "F"))
+    outcome = provisional if complete or blocking else "INCOMPLETE"
+    confidence = _confidence(signals, complete)
 
     return {
         "mode": mode,
@@ -295,8 +484,17 @@ def fuse(signals: List[Dict[str, Any]], mode: str) -> Dict[str, Any]:
         "escalations": escalations,
         "cap_applied": cap_label,
         "outcome": outcome,
+        "provisional_outcome": provisional if not complete else None,
+        "complete": complete,
         "confidence": confidence,
+        "risk_tier": min((e["caps_at"] for e in escalations),
+                         key=lambda level: {"critical": 0, "high": 1, "medium": 2}[level],
+                         default="not assigned"),
         "active_weight_covered": round(active_weight, 2),
+        "effective_weights": {
+            s["name"]: round(weights[s["name"]] / active_weight, 6)
+            for s in usable
+        } if active_weight else {},
     }
 
 
@@ -304,15 +502,27 @@ def _escalations(signals: List[Dict[str, Any]]) -> List[Dict[str, str]]:
     out = []
     by = {s["name"]: s for s in signals}
     sec = by.get("secrets")
-    if sec and sec["status"] == "ok" and sec["subscore"] == 0:
-        out.append({"rule": "Potential live secret exposed", "caps_at": "critical"})
+    if sec and sec["status"] == "ok" and sec.get("evidence_type") == "verified_finding" \
+            and isinstance(sec.get("raw"), dict) and sec["raw"].get("verified_live") is True:
+        out.append({"rule": "Verified live secret exposed", "caps_at": "critical"})
     kv = by.get("known_vulns")
-    if kv and kv["status"] == "ok" and isinstance(kv.get("raw"), dict) \
-            and kv["raw"].get("CRITICAL", 0) > 0:
-        out.append({"rule": "Unpatched CRITICAL vulnerability", "caps_at": "high"})
+    if kv and isinstance(kv.get("raw"), dict) and any(
+            finding.get("severity") == "CRITICAL" and finding.get("fixed_versions")
+            for finding in kv["raw"].get("findings", [])):
+        out.append({"rule": "Unpatched CRITICAL vulnerability with fix", "caps_at": "high"})
     mnt = by.get("maintenance")
-    if mnt and mnt["status"] == "ok" and mnt["subscore"] == 0:
-        out.append({"rule": "Archived / EOL project", "caps_at": "high"})
+    if mnt and mnt["status"] == "ok" and isinstance(mnt.get("raw"), dict) \
+            and mnt["raw"].get("critical_dependency") is True \
+            and (mnt["raw"].get("archived") is True or mnt["raw"].get("eol") is True
+                 or mnt["raw"].get("unmaintained_over_year") is True):
+        out.append({"rule": "Archived / EOL critical dependency", "caps_at": "high"})
+    prov = by.get("provenance")
+    if prov and prov["status"] == "ok" and prov.get("evidence_type") == "verified_finding" \
+            and isinstance(prov.get("raw"), dict) \
+            and prov["raw"].get("distributing_binaries") is True \
+            and prov["raw"].get("releases_signed") is False \
+            and prov["raw"].get("slsa_level") in (0, 1):
+        out.append({"rule": "Unsigned low-provenance binaries", "caps_at": "medium"})
     return out
 
 
@@ -338,14 +548,10 @@ def _outcome(score: Optional[float], mode: str,
     return "D"
 
 
-def _confidence(active_weight: float, base: Optional[float]) -> str:
-    """Confidence keys off how much of the mode's weight the run actually covered.
-
-    Missing data never inflates confidence: a partial run cannot report 'high'.
-    """
-    if base is None or active_weight < 0.5:
+def _confidence(signals: List[Dict[str, Any]], complete: bool) -> str:
+    if not complete or any(s["confidence"] == "low" for s in signals):
         return "low"
-    if active_weight < 0.8:
+    if any(s["confidence"] == "medium" for s in signals):
         return "medium"
     return "high"
 
@@ -358,18 +564,168 @@ def classify_target(target: str) -> Dict[str, bool]:
     return {"is_repo": bool(is_repo and not is_local), "is_local": is_local}
 
 
-def evaluate(target: str, mode: str) -> Dict[str, Any]:
+def _utc(value: str) -> datetime:
+    try:
+        date = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (ValueError, TypeError) as exc:
+        raise ValueError("Expected an ISO-8601 timestamp with timezone") from exc
+    if date.tzinfo is None:
+        raise ValueError("Timestamp must include a timezone")
+    return date.astimezone(timezone.utc)
+
+
+def _nonnegative(value: Any) -> int:
+    if type(value) is not int or value < 0:
+        raise ValueError("Evidence counts must be non-negative integers")
+    return value
+
+
+def _manual_signal(item: Dict[str, Any]) -> Dict[str, Any]:
+    name = item["name"]
+    facts = item["facts"]
+    if not isinstance(facts, dict) or item["evidence_type"] not in (
+            "manual_observation", "self_report"):
+        raise ValueError("Invalid manual evidence type or facts")
+    fields = {
+        "supply_chain": {"direct_high_critical", "transitive_high_critical",
+                         "pinned_lockfile"},
+        "provenance": {"slsa_level"},
+        "baseline": {"controls_met", "controls_total", "catalog_version"},
+        "threat_coverage": {"coverage"},
+        "code_review": {"required_reviews", "protected_default_branch"},
+    }
+    if name not in fields or set(facts) != fields[name]:
+        raise ValueError("Unsupported or extra manual evidence facts")
+    tool = item["tool"]
+    if not isinstance(tool, dict) or not all(
+            isinstance(tool.get(k), str) and tool[k] for k in ("name", "version")):
+        raise ValueError("Evidence needs tool name and version (use 'manual' for manual review)")
+    _utc(item["captured_at"])
+    if not isinstance(item["source"], str) or not item["source"].strip():
+        raise ValueError("Evidence needs a source description")
+    if name == "supply_chain":
+        direct = _nonnegative(facts["direct_high_critical"])
+        transitive = _nonnegative(facts["transitive_high_critical"])
+        if type(facts["pinned_lockfile"]) is not bool:
+            raise ValueError("pinned_lockfile must be boolean")
+        score = min(100, max(0, 100 - 5 * direct - 2 * transitive)
+                    + (10 if facts["pinned_lockfile"] else 0))
+        finding = f"{direct} direct and {transitive} transitive high/critical dependencies."
+    elif name == "provenance":
+        level = facts["slsa_level"]
+        if type(level) is not int or level not in (0, 1, 2, 3):
+            raise ValueError("slsa_level must be 0..3")
+        score = {0: 10, 1: 40, 2: 70, 3: 100}[level]
+        finding = f"Reported SLSA level {level}; artifact verification not performed by evaluator."
+    elif name == "baseline":
+        met, total = _nonnegative(facts["controls_met"]), _nonnegative(facts["controls_total"])
+        if total == 0 or met > total or not isinstance(facts.get("catalog_version"), str) \
+                or not facts["catalog_version"]:
+            raise ValueError("Baseline needs catalog_version and 0 <= met <= total > 0")
+        score = round(100 * met / total, 1)
+        finding = f"{met}/{total} controls met for catalog {facts['catalog_version']} (custom heuristic)."
+    elif name == "threat_coverage":
+        coverage = facts["coverage"]
+        if coverage not in ("current", "partial", "none"):
+            raise ValueError("Threat coverage must be current, partial, or none")
+        score = {"current": 100, "partial": 50, "none": 0}[coverage]
+        finding = f"Threat model coverage: {coverage} (manual observation)."
+    elif name == "code_review":
+        if type(facts["required_reviews"]) is not bool or \
+                type(facts["protected_default_branch"]) is not bool:
+            raise ValueError("Code review facts must be booleans")
+        score = 50 * (facts["required_reviews"] + facts["protected_default_branch"])
+        finding = "Required reviews and protected branch assessed manually."
+    if item["evidence_type"] == "self_report":
+        return signal(name, "unknown", None, "low",
+                      f"Self-reported {finding} Requires independent confirmation.",
+                      raw=facts, evidence_type="self_report", source=item["source"],
+                      captured_at=item["captured_at"], tool=tool)
+    return signal(name, "ok", score, "low", finding, raw=facts,
+                  evidence_type="manual_observation", source=item["source"],
+                  captured_at=item["captured_at"], tool=tool)
+
+
+def _import_evidence(path: Path, target: str, mode: str) -> Dict[str, Dict[str, Any]]:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict) or data.get("schema_version") != SCHEMA_VERSION \
+            or data.get("target") != target or data.get("mode") != mode \
+            or not isinstance(data.get("observations"), list):
+        raise ValueError("Evidence schema, target, or mode mismatch")
+    result = {}
+    for item in data["observations"]:
+        if not isinstance(item, dict):
+            raise ValueError("Evidence observations must be objects")
+        s = _manual_signal(item)
+        if s["name"] in result or s["name"] not in MODE_WEIGHTS[mode]:
+            raise ValueError("Duplicate or inapplicable evidence signal")
+        result[s["name"]] = s
+    return result
+
+
+def _actions(signals: List[Dict[str, Any]], target: str) -> List[str]:
+    actions = []
+    for s in signals:
+        if s["name"] == "secrets" and s["status"] == "ok" \
+                and s["raw"].get("potential_count"):
+            actions.append("Review Gitleaks findings locally; rotate any verified live credentials and investigate exposure.")
+        if s["name"] == "known_vulns" and isinstance(s.get("raw"), dict):
+            for f in s["raw"].get("findings", []):
+                if f["fixed_versions"]:
+                    actions.append(f"Upgrade {f['package']}@{f['version']} past "
+                                   f"{', '.join(f['fixed_versions'])} for {f['id']}.")
+                else:
+                    actions.append(f"Investigate {f['id']} in {f['package']}@{f['version']}; "
+                                   "confirm severity and available fixes.")
+    if not actions:
+        if Path(target).exists():
+            actions.append("Inventory local dependencies and existing security artifacts "
+                           "with `python3 scripts/assess-project.py <path>`; review "
+                           "the highest-impact finding before installing optional scanners.")
+        else:
+            actions.append("Identify the exact upstream artifact and dependency version; "
+                           "review available advisories before choosing optional scanners.")
+    return actions[:10]
+
+
+def _report(target: str, mode: str, signals: List[Dict[str, Any]],
+            evaluated_at: str) -> Dict[str, Any]:
+    at = _utc(evaluated_at)
+    for s in signals:
+        captured = s.get("captured_at")
+        s["age_days"] = round((at - _utc(captured)).total_seconds() / 86400, 1) \
+                        if captured else None
+    verdict = fuse(signals, mode)
+    return {
+        "schema_version": SCHEMA_VERSION, "policy_version": POLICY_VERSION,
+        "target": target,
+        "target_kind": "local" if Path(target).exists() else
+                       ("repo" if classify_target(target)["is_repo"] else "package"),
+        "target_identity": {"requested": target, "resolved": False},
+        "mode": mode, "evaluated_at": evaluated_at,
+        "signals": signals, "verdict": verdict,
+        "gaps": [{"signal": s["name"], "reason": s["finding"]}
+                 for s in signals if s["status"] != "ok"],
+        "actions": _actions(signals, target),
+    }
+
+
+def evaluate(target: str, mode: str, evidence: Optional[Path] = None,
+             evaluated_at: Optional[str] = None) -> Dict[str, Any]:
+    evaluated_at = evaluated_at or datetime.now(timezone.utc).isoformat()
+    _utc(evaluated_at)
     kind = classify_target(target)
     is_repo, is_local = kind["is_repo"], kind["is_local"]
 
     signals = [
         probe_scorecard(target, is_repo),
         probe_known_vulns(target, is_local),
-        probe_maintenance(target, is_local),
-        probe_supply_chain(target),
         probe_provenance(target),
         probe_baseline(target),
     ]
+    if mode == "consume":
+        signals[2:2] = [probe_maintenance(target, is_local),
+                        probe_supply_chain(target)]
     if mode == "produce":
         signals += [
             probe_secrets(target, is_local),
@@ -377,55 +733,179 @@ def evaluate(target: str, mode: str) -> Dict[str, Any]:
             probe_threat_coverage(target),
         ]
 
-    fusion = fuse(signals, mode)
-    return {
-        "target": target,
-        "target_kind": "local" if is_local else ("repo" if is_repo else "package"),
-        "mode": mode,
-        "signals": signals,
-        "verdict": fusion,
-    }
+    if evidence:
+        imported = _import_evidence(evidence, target, mode)
+        signals = [imported.get(s["name"], s) if s["status"] != "ok" else s
+                   for s in signals]
+    for s in signals:
+        if s["status"] == "ok" and not s["captured_at"]:
+            s["captured_at"] = evaluated_at
+        if s["status"] == "ok" and not s["tool"]:
+            tool_name = {"maintenance": "git" if is_local else "gh",
+                         "scorecard": "scorecard", "code_review": "local files"}.get(s["name"])
+            if tool_name:
+                s["tool"] = {"name": tool_name, "version":
+                             _tool_version(tool_name) if tool_name not in ("local files",)
+                             else "not applicable"}
+        elif s["status"] == "ok" and s["tool"]["version"] == "unrecorded":
+            s["tool"]["version"] = _tool_version(s["tool"]["name"])
+    return _report(target, mode, signals, evaluated_at)
+
+
+def replay(snapshot: Path, evaluated_at: Optional[str] = None) -> Dict[str, Any]:
+    data = json.loads(snapshot.read_text(encoding="utf-8"))
+    if not isinstance(data, dict) or data.get("schema_version") != SCHEMA_VERSION \
+            or data.get("policy_version") != POLICY_VERSION \
+            or data.get("mode") not in MODE_WEIGHTS or not isinstance(data.get("target"), str) \
+            or not isinstance(data.get("signals"), list):
+        raise ValueError("Snapshot schema or policy version invalid")
+    at = evaluated_at or data.get("evaluated_at")
+    _utc(at)
+    if not all(isinstance(s, dict) for s in data["signals"]):
+        raise ValueError("Invalid snapshot signal")
+    report = _report(data["target"], data["mode"], data["signals"], at)
+    if data.get("target_kind") not in ("local", "repo", "package") or \
+            not isinstance(data.get("target_identity"), dict):
+        raise ValueError("Snapshot target identity missing")
+    report["target_kind"] = data["target_kind"]
+    report["target_identity"] = data["target_identity"]
+    return report
+
+
+def _md(value: Any) -> str:
+    text = str(value).replace("\n", " ").replace("\r", " ")
+    return re.sub(r"([\\`*_{}\[\]()<>!#|])", r"\\\1", text)
+
+
+def _risks(signals: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    risks = []
+    for s in signals:
+        if s["name"] == "known_vulns" and isinstance(s.get("raw"), dict):
+            for f in s["raw"].get("findings", []):
+                severity = f["severity"]
+                if severity:
+                    # Exposure is not resolved yet: conservative direct/production
+                    # assumption, explicitly disclosed in the report.
+                    rank = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1}[severity] \
+                           * (2 if f["fixed_versions"] else 1) * 3
+                    risks.append({"finding": f"{f['id']}: {f['package']}@{f['version']}",
+                                  "priority": rank, "source": "OSV-Scanner",
+                                  "basis": f"{severity}; fix "
+                                           + ("available" if f["fixed_versions"] else "not established")
+                                           + "; exposure assumed direct pending verification"})
+        if s["name"] == "secrets" and s["status"] == "ok" \
+                and s["raw"].get("potential_count"):
+            risks.append({"finding": f"{s['raw']['potential_count']} potential secret(s)",
+                          "priority": None, "source": "Gitleaks",
+                          "basis": "Liveness unverified; triage promptly, not a confirmed live secret"})
+    return sorted(risks, key=lambda x: (x["priority"] is None, -(x["priority"] or 0),
+                                       x["finding"]))[:5]
 
 
 def to_markdown(report: Dict[str, Any]) -> str:
     v = report["verdict"]
     lines = [
-        f"# OpenSSF Ensemble Evaluation — {report['target']}",
+        f"# OpenSSF Ensemble Evaluation — {_md(report['target'])}",
         "",
         f"- **Mode:** {report['mode']}",
         f"- **Target kind:** {report['target_kind']}",
+        f"- **Identity:** requested `{_md(report['target'])}`; "
+        + ("resolved" if report["target_identity"]["resolved"] else
+           "not pinned to an immutable artifact"),
+        f"- **Evaluated:** {_md(report['evaluated_at'])} · "
+        f"**Policy:** custom heuristic v{_md(report['policy_version'])} · "
+        f"**Schema:** v{report['schema_version']}",
+        f"- **Evidence coverage:** {sum(s['status'] == 'ok' for s in report['signals'])}"
+        f"/{len(report['signals'])} probes; weighted {v['active_weight_covered']:.0%}",
         "",
         "## Verdict",
         "",
-        f"> **{v['outcome']}** · base {v['base_score']} → final {v['final_score']} "
-        f"· confidence {v['confidence']}",
+        f"> **{v['outcome']}** · base "
+        f"{v['base_score'] if v['base_score'] is not None else 'n/a'} → final "
+        f"{v['final_score'] if v['final_score'] is not None else 'n/a'} "
+        f"· confidence {v['confidence']} · risk tier {v['risk_tier']}",
         "",
     ]
+    if v["outcome"] == "INCOMPLETE" and v["base_score"] is None:
+        lines += ["No scored weighted evidence yet; the actions below can start now.", ""]
+    elif v["outcome"] == "INCOMPLETE":
+        lines += [f"The computed {v['provisional_outcome']} is **provisional**, not an "
+                  "adoption recommendation or grade; resolve evidence gaps for assurance. "
+                  "The actions below can start now.", ""]
     if v["cap_applied"]:
-        lines.append(f"_Escalation cap applied: {v['cap_applied']}_\n")
+        lines.append(f"_Escalation cap applied: {_md(v['cap_applied'])}_\n")
     lines += ["## Evidence", "",
-              "| Signal | Status | Sub-score | Confidence | Finding |",
-              "|--------|--------|-----------|------------|---------|"]
+              "| Signal | Status | Sub-score | Original → effective weight | "
+              "Contribution | Confidence | Source / time / age | Finding |",
+              "|--------|--------|-----------|-----------------------------|"
+              "--------------|------------|---------------|---------|"]
     for s in report["signals"]:
         ss = "—" if s["subscore"] is None else s["subscore"]
-        lines.append(f"| {s['name']} | {s['status']} | {ss} | "
-                     f"{s['confidence']} | {s['finding']} |")
-    unknown = [s for s in report["signals"] if s["status"] != "ok"]
-    if unknown:
-        lines += ["", "## Could not determine", ""]
-        lines += [f"- **{s['name']}** — {s['finding']}" for s in unknown]
+        original = MODE_WEIGHTS[report["mode"]][s["name"]]
+        effective = v["effective_weights"].get(s["name"], 0)
+        contribution = round(ss * effective, 2) if isinstance(ss, (float, int)) else "—"
+        lines.append(f"| {_md(s['name'])} | {_md(s['status'])} | {ss} | "
+                     f"{original:.2f} → {effective:.3f} | {contribution} | "
+                     f"{_md(s['confidence'])} | {_md(s.get('source', s['name']))} "
+                     f"({_md(s.get('evidence_type', 'observation'))}, "
+                     f"{_md(s.get('captured_at') or 'time unrecorded')}, "
+                     f"{_md(str(s['age_days']) + 'd' if s.get('age_days') is not None else 'age unknown')}, "
+                     f"{_md((s.get('tool') or {}).get('version', 'tool version unrecorded'))}) | "
+                     f"{_md(s['finding'])} |")
+    lines += ["", f"**Math:** Σ(sub-score × effective weight) = "
+              f"{v['base_score'] if v['base_score'] is not None else 'n/a'}; "
+              f"cap → {v['final_score'] if v['final_score'] is not None else 'n/a'}. "
+              f"Escalations: {', '.join(e['rule'] for e in v['escalations']) or 'none'}.",
+              "", "## Top risks (ranked)", ""]
+    risks = _risks(report["signals"])
+    lines.extend(f"{i}. **{_md(r['finding'])}** — {_md(r['source'])}; "
+                 f"priority {_md(r['priority'] if r['priority'] is not None else 'unranked')}. "
+                 f"{_md(r['basis'])}."
+                 for i, r in enumerate(risks, 1))
+    if not risks:
+        lines.append("No ranked findings in the available evidence; this is not a clean bill of health.")
+    lines += ["", "## Required actions", ""]
+    lines.extend(f"- [ ] {_md(action)}" for action in report["actions"])
+    if not report["actions"]:
+        lines.append("No immediate action established by the available evidence.")
+    lines += ["", "## What we could not determine", ""]
+    lines.extend(f"- **{_md(gap['signal'])}** — {_md(gap['reason'])}"
+                 for gap in report["gaps"])
+    if not report["gaps"]:
+        lines.append("No missing weighted probes; target identity and tool coverage may still be limited.")
+    else:
+        lines += ["", "These gaps limit assurance, not immediate progress. Run or import "
+                  "only the evidence relevant to your next decision; scanners are optional."]
+    lines += ["", "## Provenance of this report", "",
+              "Signals name their source, observation type, and capture time above. "
+              "Manual observations and self-reports are not independent verification. "
+              "Scanner diagnostics and secret contents are never included. "
+              "This is a custom risk heuristic, not OpenSSF certification."]
     return "\n".join(lines)
 
 
 def main():
     ap = argparse.ArgumentParser(description="OpenSSF ensemble evaluator")
-    ap.add_argument("--target", required=True,
+    selection = ap.add_mutually_exclusive_group(required=True)
+    selection.add_argument("--target",
                     help="local path, repo URL (owner/repo), or package@version")
-    ap.add_argument("--mode", choices=["consume", "produce"], required=True)
+    selection.add_argument("--replay", type=Path, help="re-evaluate a JSON snapshot without scanners")
+    ap.add_argument("--mode", choices=["consume", "produce"])
     ap.add_argument("--format", choices=["json", "md"], default="json")
+    ap.add_argument("--evidence", type=Path, help="import versioned, target-bound manual observations")
+    ap.add_argument("--snapshot-out", type=Path, help="write sanitized replayable JSON")
+    ap.add_argument("--at", help="ISO-8601 evaluation time (UTC offset required)")
     args = ap.parse_args()
-
-    report = evaluate(args.target, args.mode)
+    if bool(args.target) != bool(args.mode) or args.replay and args.evidence:
+        ap.error("--target requires --mode; --evidence cannot be used with --replay")
+    try:
+        report = (replay(args.replay, args.at) if args.replay else
+                  evaluate(args.target, args.mode, args.evidence, args.at))
+        if args.snapshot_out:
+            args.snapshot_out.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        ap.error(f"Evidence validation or output failed ({type(exc).__name__}); "
+                 "check schema, target, mode, and writable paths")
     if args.format == "md":
         print(to_markdown(report))
     else:
