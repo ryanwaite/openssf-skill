@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-OpenSSF Security Assessment Script
+OpenSSF Local Project Inventory
 
-Analyzes a project's security posture by detecting:
+Inventories a project's local security indicators by detecting:
 - Programming languages and frameworks
 - Existing security artifacts
 - CI/CD configuration
@@ -15,12 +15,25 @@ Output: JSON report with project context and prioritized recommendations.
 
 import sys
 import json
+import fnmatch
+import os
+import re
 from pathlib import Path
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Iterator
 
 # Directories to exclude from recursive file searches
 _EXCLUDED_DIRS = {'.git', 'node_modules', 'vendor', '__pycache__', '.tox',
                   '.venv', 'venv', 'dist', 'build', '.eggs'}
+
+
+def _source_files(project_path: Path) -> Iterator[str]:
+    """Walk source once, pruning excluded directories at every depth."""
+    for root, dirs, files in os.walk(project_path, followlinks=False):
+        dirs[:] = [name for name in dirs
+                   if name not in _EXCLUDED_DIRS
+                   and not (Path(root) / name).is_symlink()]
+        for name in files:
+            yield name
 
 
 def detect_languages(project_path: Path) -> List[Dict[str, Any]]:
@@ -88,47 +101,20 @@ def detect_languages(project_path: Path) -> List[Dict[str, Any]]:
         },
     }
 
-    detected = []
-
-    for lang, config in indicators.items():
-        found = False
-
-        # Check for indicator files (top-level and one level of recursion)
-        for pattern in config['files']:
-            # Check top-level match
-            if list(project_path.glob(pattern)):
-                found = True
-                break
-            # Check subdirectories, excluding common non-source dirs
-            for child in project_path.iterdir():
-                if child.is_dir() and child.name not in _EXCLUDED_DIRS:
-                    if list(child.rglob(pattern)):
-                        found = True
-                        break
-            if found:
-                break
-
-        # Check for file extensions if not found by indicator files
-        if not found:
-            for ext in config['extensions']:
-                for child in project_path.iterdir():
-                    if child.is_dir() and child.name not in _EXCLUDED_DIRS:
-                        if list(child.rglob(f'*{ext}')):
-                            found = True
-                            break
-                    elif child.suffix == ext:
-                        found = True
-                        break
-                if found:
-                    break
-
-        if found:
-            detected.append({
-                'language': lang,
-                'package_manager': config['package_manager']
-            })
-
-    return detected
+    found = set()
+    for name in _source_files(project_path):
+        for lang, config in indicators.items():
+            if lang not in found and (
+                    any(fnmatch.fnmatchcase(name, pattern) for pattern in config['files'])
+                    or name.endswith(tuple(config['extensions']))):
+                found.add(lang)
+        if len(found) == len(indicators):
+            break
+    return [
+        {'language': lang, 'package_manager': config['package_manager']}
+        for lang, config in indicators.items()
+        if lang in found
+    ]
 
 
 def check_security_artifacts(project_path: Path) -> Dict[str, Dict[str, Any]]:
@@ -251,7 +237,9 @@ def check_ci_setup(project_path: Path) -> Dict[str, Any]:
     workflows_dir = project_path / '.github' / 'workflows'
 
     ci_systems = {
-        'github_actions': workflows_dir.exists(),
+        'github_actions': workflows_dir.is_dir() and any(
+            p.is_file() and p.suffix in ('.yml', '.yaml')
+            for p in workflows_dir.iterdir()),
         'gitlab_ci': (project_path / '.gitlab-ci.yml').exists(),
         'circle_ci': (project_path / '.circleci' / 'config.yml').exists(),
         'travis_ci': (project_path / '.travis.yml').exists(),
@@ -279,7 +267,8 @@ def check_ci_setup(project_path: Path) -> Dict[str, Any]:
         'has_ci': any(ci_systems.values()),
         'has_tests': any(test_indicators),
         'workflows_count': len([f for f in workflows_dir.iterdir()
-                                if f.suffix in ('.yml', '.yaml')]) if workflows_dir.exists() else 0
+                                if f.is_file() and f.suffix in ('.yml', '.yaml')])
+        if workflows_dir.is_dir() else 0
     }
 
 
@@ -301,35 +290,105 @@ def check_branch_protection_indicators(project_path: Path) -> Dict[str, Any]:
     return {
         'pr_template_exists': pr_template_exists,
         'codeowners_exists': codeowners_exists,
-        'note': 'Branch protection settings require GitHub API to fully verify'
+        'status': 'unknown',
+        'note': 'PR templates and CODEOWNERS do not prove enforced review or branch protection; verify forge rulesets/settings separately'
     }
+
+
+def check_security_capabilities(project_path: Path, artifacts: Dict[str, Dict]) -> Dict[str, Dict[str, Any]]:
+    """Identify local scan configuration, not remote enablement or successful runs."""
+    workflows = project_path / '.github' / 'workflows'
+    patterns = {
+        'code_scanning': r'(?im)^\s*(?:-\s*)?uses:\s*github/codeql-action/(?:init|analyze)\b',
+        'secrets_scanning': r'(?im)^\s*(?:-\s*)?(?:uses:\s*(?:gitleaks/gitleaks-action|trufflesecurity/trufflehog)|run:\s*["\x27]?(?:\S+\s+)*?(?:gitleaks|trufflehog)\b)',
+        'scorecard': r'(?im)^\s*(?:-\s*)?uses:\s*ossf/scorecard-action\b',
+    }
+    matches = {key: [] for key in patterns}
+    reusable = []
+    unreadable = []
+    if workflows.is_dir() and not workflows.is_symlink():
+        for path in sorted(workflows.iterdir()):
+            if path.is_symlink() or not path.is_file() or path.suffix not in ('.yml', '.yaml'):
+                continue
+            relative = path.relative_to(project_path).as_posix()
+            try:
+                if path.stat().st_size > 256_000:
+                    unreadable.append(relative)
+                    continue
+                text = path.read_text(encoding='utf-8')
+            except (OSError, UnicodeError):
+                unreadable.append(relative)
+                continue
+            for key, pattern in patterns.items():
+                if re.search(pattern, text):
+                    matches[key].append(relative)
+            if re.search(r'(?im)^\s*(?:-\s*)?uses:\s*(?:\./|[\w.-]+/[\w.-]+/)\.github/workflows/', text):
+                reusable.append(relative)
+
+    capabilities = {}
+    for key in patterns:
+        paths = matches[key]
+        capabilities[key] = {
+            'status': 'configured' if paths else 'unknown',
+            'evidence': paths,
+            'note': ('Local workflow reference found; execution and results unverified.'
+                     if paths else
+                     'No recognized local workflow; forge defaults, centralized/reusable workflows and scan runs unverified.')
+        }
+    capabilities['secrets_scanning']['config_only'] = (
+        artifacts.get('gitleaks_config', {}).get('exists', False)
+        and not matches['secrets_scanning'])
+    capabilities['reusable_workflows'] = {
+        'status': 'unknown', 'evidence': reusable,
+        'note': 'Referenced reusable workflow contents and execution cannot be verified locally.'
+    }
+    capabilities['unreadable_workflows'] = unreadable
+    capabilities['dependency_updates'] = {
+        'status': 'configured' if (artifacts['dependabot']['exists'] or artifacts['renovate']['exists']) else 'unknown',
+        'note': 'Configuration presence does not verify that updates are enabled or running.'
+    }
+    return capabilities
 
 
 def generate_recommendations(
     languages: List[Dict],
     artifacts: Dict[str, Dict],
     ci_setup: Dict[str, Any],
-    branch_protection: Dict[str, Any] = None
+    branch_protection: Dict[str, Any] = None,
+    capabilities: Dict[str, Any] = None
 ) -> List[Dict[str, Any]]:
-    """Generate prioritized security recommendations based on assessment."""
+    """Recommend incremental actions; missing local files are not incidents."""
     recommendations = []
     branch_protection = branch_protection or {}
+    capabilities = capabilities or {}
+    github_actions = ci_setup.get('ci_systems', {}).get('github_actions', False)
+    lang_names = {lang['language'] for lang in languages}
 
-    # Critical: Security policy
+    # A missing policy is actionable, not evidence of an active vulnerability.
     if not artifacts['security_policy']['exists']:
         recommendations.append({
-            'priority': 'critical',
+            'priority': 'high',
             'category': 'documentation',
             'action': 'Create SECURITY.md',
-            'reason': 'Required for responsible vulnerability disclosure. Users and researchers need to know how to report security issues.',
+            'reason': 'Provide a private way to report vulnerabilities; no scanner or account setup is needed to draft the policy.',
             'effort': 'low',
             'time_estimate': '15 minutes'
         })
 
-    # High: Dependency updates
-    if not artifacts['dependabot']['exists'] and not artifacts['renovate']['exists']:
+    if lang_names:
         recommendations.append({
             'priority': 'high',
+            'category': 'dependencies',
+            'action': 'Check known vulnerability advisories for direct dependencies',
+            'reason': 'Start with the dependencies in the existing manifests/lockfiles; triage known critical fixes first. Use a package-manager audit if already available, or review advisories manually.',
+            'effort': 'low',
+            'time_estimate': '15 minutes'
+        })
+
+    # Optional automation; file absence is not evidence of vulnerable dependencies.
+    if not artifacts['dependabot']['exists'] and not artifacts['renovate']['exists']:
+        recommendations.append({
+            'priority': 'medium',
             'category': 'dependencies',
             'action': 'Enable Dependabot or Renovate',
             'reason': 'Automated dependency updates help patch vulnerabilities quickly.',
@@ -337,10 +396,10 @@ def generate_recommendations(
             'time_estimate': '10 minutes'
         })
 
-    # High: License
+    # Licensing matters for distribution, but is not an urgent security risk.
     if not artifacts['license']['exists']:
         recommendations.append({
-            'priority': 'high',
+            'priority': 'low',
             'category': 'legal',
             'action': 'Add LICENSE file',
             'reason': 'Clear licensing is required for open source projects and helps users understand usage rights.',
@@ -348,24 +407,26 @@ def generate_recommendations(
             'time_estimate': '5 minutes'
         })
 
-    # Medium: Scorecard
-    if ci_setup.get('has_ci') and not artifacts['scorecard_workflow']['exists']:
+    # CI templates only apply to the CI service and supported languages.
+    if github_actions and capabilities.get('scorecard', {}).get('status') != 'configured':
         recommendations.append({
             'priority': 'medium',
             'category': 'security_scanning',
-            'action': 'Add OpenSSF Scorecard workflow',
-            'reason': 'Continuous security posture monitoring helps identify issues early.',
+            'action': 'Check Scorecard coverage; optionally add a GitHub Actions workflow',
+            'reason': 'No recognized local Scorecard action; hosted or centralized scanning may already exist.',
             'effort': 'low',
             'time_estimate': '10 minutes'
         })
 
-    # Medium: CodeQL
-    if ci_setup.get('has_ci') and not artifacts['codeql_workflow']['exists']:
+    if (github_actions and lang_names.intersection({
+            'python', 'javascript', 'typescript', 'go', 'rust', 'java', 'kotlin',
+            'ruby', 'swift', 'dotnet'})
+            and capabilities.get('code_scanning', {}).get('status') != 'configured'):
         recommendations.append({
             'priority': 'medium',
             'category': 'security_scanning',
-            'action': 'Enable CodeQL analysis',
-            'reason': 'Static analysis catches common vulnerability patterns automatically.',
+            'action': 'Check code scanning coverage (CodeQL if supported)',
+            'reason': 'GitHub default setup or centralized scanning may be enabled; verify before adding a workflow.',
             'effort': 'low',
             'time_estimate': '15 minutes'
         })
@@ -437,7 +498,7 @@ def generate_recommendations(
         })
 
     # Medium: SLSA provenance
-    if ci_setup.get('has_ci') and not artifacts.get('slsa_provenance_workflow', {}).get('exists'):
+    if github_actions and not artifacts.get('slsa_provenance_workflow', {}).get('exists'):
         recommendations.append({
             'priority': 'medium',
             'category': 'supply_chain',
@@ -448,7 +509,7 @@ def generate_recommendations(
         })
 
     # Medium: SBOM workflow
-    if ci_setup.get('has_ci') and not artifacts.get('sbom_workflow', {}).get('exists') and not artifacts.get('sbom', {}).get('exists'):
+    if github_actions and not artifacts.get('sbom_workflow', {}).get('exists') and not artifacts.get('sbom', {}).get('exists'):
         recommendations.append({
             'priority': 'medium',
             'category': 'supply_chain',
@@ -459,12 +520,21 @@ def generate_recommendations(
         })
 
     # Medium: Secrets scanning
-    if ci_setup.get('has_ci') and not artifacts.get('secrets_scanning_workflow', {}).get('exists') and not artifacts.get('gitleaks_config', {}).get('exists'):
+    if capabilities.get('secrets_scanning', {}).get('status') != 'configured':
         recommendations.append({
-            'priority': 'medium',
+            'priority': 'high' if artifacts.get('gitleaks_config', {}).get('exists') else 'medium',
             'category': 'security_scanning',
-            'action': 'Add secrets scanning (Gitleaks or TruffleHog)',
-            'reason': 'Secrets scanning detects leaked API keys, passwords, and tokens before they reach production.',
+            'action': 'Run a targeted secrets scan or verify existing scan coverage',
+            'reason': 'A Gitleaks config or named workflow alone does not prove a scan ran; use an available local scanner or verify existing CI/forge results.',
+            'effort': 'low',
+            'time_estimate': '10 minutes'
+        })
+    else:
+        recommendations.append({
+            'priority': 'low',
+            'category': 'security_scanning',
+            'action': 'Verify secrets scanning runs and review findings',
+            'reason': 'Local workflow configuration does not establish successful execution.',
             'effort': 'low',
             'time_estimate': '10 minutes'
         })
@@ -481,8 +551,6 @@ def generate_recommendations(
         })
 
     # Language-specific recommendations
-    lang_names = {l['language'] for l in languages}
-
     lang_audit_tools = {
         'python': ('pip-audit', 'pip-audit scans Python dependencies for known vulnerabilities.'),
         'javascript': ('npm audit', 'npm audit scans Node.js dependencies for known vulnerabilities.'),
@@ -514,12 +582,12 @@ def generate_recommendations(
 
 def calculate_security_score(artifacts: Dict, ci_setup: Dict,
                              branch_protection: Dict = None) -> Dict[str, Any]:
-    """Calculate a simple security posture score."""
+    """Calculate a legacy, presence-based local readiness band, not assurance."""
     branch_protection = branch_protection or {}
     total_checks = 0
     passed_checks = 0
 
-    # Critical checks (weighted x3)
+    # Legacy weights retained for consumers of security_score/checks_passed.
     critical_items = ['security_policy', 'license']
     for item in critical_items:
         total_checks += 3
@@ -557,23 +625,25 @@ def calculate_security_score(artifacts: Dict, ci_setup: Dict,
 
     if score >= 80:
         grade = 'A'
-        assessment = 'Strong security posture'
+        assessment = 'High local artifact readiness; controls not verified'
     elif score >= 60:
         grade = 'B'
-        assessment = 'Good foundation, room for improvement'
+        assessment = 'Moderate local artifact readiness; controls not verified'
     elif score >= 40:
         grade = 'C'
-        assessment = 'Basic security, significant gaps'
+        assessment = 'Partial local artifact readiness; controls not verified'
     elif score >= 20:
         grade = 'D'
-        assessment = 'Minimal security controls'
+        assessment = 'Few local artifacts found; controls not verified'
     else:
         grade = 'F'
-        assessment = 'Critical security gaps'
+        assessment = 'Few or no local artifacts found; controls not verified'
 
     return {
+        'kind': 'local_artifact_readiness',
+        'assurance': 'unverified',
         'score': score,
-        'grade': grade,
+        'grade': grade,  # Legacy readiness band; not the audit/OSPS Baseline grade.
         'assessment': assessment,
         'checks_passed': passed_checks,
         'total_checks': total_checks
@@ -588,8 +658,8 @@ def main():
     else:
         project_path = Path.cwd()
 
-    if not project_path.exists():
-        print(json.dumps({'error': f'Path does not exist: {project_path}'}))
+    if not project_path.is_dir():
+        print(json.dumps({'error': f'Not a project directory: {project_path}'}))
         sys.exit(1)
 
     # Run assessment
@@ -597,7 +667,8 @@ def main():
     artifacts = check_security_artifacts(project_path)
     ci_setup = check_ci_setup(project_path)
     branch_protection = check_branch_protection_indicators(project_path)
-    recommendations = generate_recommendations(languages, artifacts, ci_setup, branch_protection)
+    capabilities = check_security_capabilities(project_path, artifacts)
+    recommendations = generate_recommendations(languages, artifacts, ci_setup, branch_protection, capabilities)
     security_score = calculate_security_score(artifacts, ci_setup, branch_protection)
 
     # Build report
@@ -607,6 +678,8 @@ def main():
         'security_artifacts': artifacts,
         'ci_setup': ci_setup,
         'branch_protection_indicators': branch_protection,
+        'capabilities': capabilities,
+        'readiness_score': security_score,
         'security_score': security_score,
         'recommendations': recommendations,
         'summary': {

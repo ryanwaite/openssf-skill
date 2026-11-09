@@ -31,9 +31,17 @@ specific control."*
 
 ## Initial Assessment
 
-When invoked, ALWAYS start by assessing the project context. You can run
-`scripts/assess-project.py <path>` to automate language/artifact detection, or
-inspect manually:
+Start with enough context to address the user's request; if a risk is already
+known (e.g. a leaked credential or critical CVE), help contain/remediate it
+**first**. Do not block a specific fix on a complete audit or scanner setup.
+For local inventory, run
+`python3 <installed-skill>/scripts/assess-project.py <target-path>` (the
+package root is two directories above this `SKILL.md`; resolve all referenced
+assets there, **not** from target cwd), or
+inspect manually. The detector uses only Python's standard library. Its
+readiness score and named files do not verify enforcement, current scans,
+centralized CI, or a security posture grade. If the package is not installed,
+give direct guidance without pretending its files are available:
 
 1. **Detect languages and frameworks** by looking for:
    - Python: `pyproject.toml`, `requirements.txt`, `setup.py`, `Pipfile`
@@ -51,9 +59,12 @@ inspect manually:
    - `sbom.json`, `sbom.xml`, `bom.json`
    - `CODEOWNERS`
 
-3. **Identify CI/CD setup**: Check `.github/workflows/` for existing automation
+3. **Identify CI/CD setup**: Check the target's actual CI provider; local
+   workflow names are not proof that scans ran. Forge defaults/rulesets and
+   reused workflows need separate verification.
 
-4. **Generate recommendations** based on gaps found
+4. **Generate recommendations** based on risk and applicability, not file
+   count. Offer the first achievable action with the least prerequisites.
 
 ## Available Security Tasks
 
@@ -111,7 +122,7 @@ Guide Software Bill of Materials creation. This skill uses **SPDX** as the defau
 1. Identify package manager(s) in use
 2. Recommend appropriate tool for the language
 3. Provide generation commands
-4. Set up CI/CD integration for automatic SBOM generation
+4. If releases warrant it, optionally set up CI/CD integration for automatic SBOM generation
 
 See `references/sbom/tools-by-language.md` for language-specific tools.
 Use `workflows/sbom-generation.yml.template` for GitHub Actions.
@@ -123,7 +134,7 @@ Run and interpret OpenSSF Scorecard, providing prioritized remediation.
 **When to use**: Assessing project security posture, improving open source security, or preparing for security audits.
 
 **Process**:
-1. Guide user to run: `scorecard --repo=github.com/owner/repo`
+1. If Scorecard is useful and available, guide user to run: `scorecard --repo=github.com/owner/repo`
 2. Parse and explain results
 3. Prioritize fixes by risk level and effort
 4. Provide specific remediation steps for each failing check
@@ -157,11 +168,9 @@ Guide through Supply chain Levels for Software Artifacts (SLSA) implementation.
 
 **When to use**: Hardening build pipeline, protecting against supply chain attacks, or meeting compliance requirements.
 
-**Levels**:
-- **Level 0**: No guarantees
-- **Level 1**: Document build process, generate provenance
-- **Level 2**: Source-aware builds, signed provenance
-- **Level 3**: Hardened CI, build definitions from source
+**SLSA v1.2** defines distinct **Build** and **Source** tracks; identify
+the relevant track, version, artifact and requirements before discussing its
+level. Generating or signing an attestation alone does not establish Build L3.
 
 **Process**:
 1. Assess current build process
@@ -178,16 +187,15 @@ Implement Open Source Project Security Baseline requirements.
 
 **When to use**: Establishing foundational security, meeting OpenSSF requirements, or onboarding to security programs.
 
-**Level 1 Requirements** (Universal Security Floor):
-- MFA on privileged accounts
-- Branch protection (no direct commits to main)
-- Code review requirements
-- Security vulnerability reporting process
-- Automated testing in CI/CD
-- Signed releases
+Use the **versioned v2026.08.28 catalog** and canonical control IDs; check
+applicability and evidence for each claimed level. The Baseline defines L1-L3
+conformance, **not** an official numeric grade or certification. In particular,
+automated testing (QA-06.01) and signed releases (BR-06.01) are L2;
+non-author human approval (QA-07.01) is L3, not a blanket L1 prerequisite.
+BR-01.03 at L1 isolates untrusted code from privileged CI credentials/assets.
 
 **Process**:
-1. Assess current compliance against checklist
+1. Assess current conformance against the versioned checklist
 2. Identify gaps
 3. Implement missing controls starting with quick wins
 4. Document evidence of compliance
@@ -299,9 +307,13 @@ See `references/container-security/docker-guide.md` for best practices and examp
 - Never assume a single language/framework
 
 ### Progressive Assistance
-- Start with quick wins (SECURITY.md, Dependabot, branch protection)
-- Build toward comprehensive security posture
-- Celebrate progress without overwhelming
+- Address known active harm first (exposed secrets or critical vulnerabilities),
+  then offer one low-friction action such as drafting SECURITY.md, reviewing an
+  advisory, or a targeted scan using a tool already available.
+- Do not label every missing artifact "critical" or require accounts, all
+  scanners, all GitHub features, attestations or an audit before helping.
+- Suggest CI automation, SBOMs and signing as later context-dependent steps,
+  not dependencies for the first action.
 
 ### Artifact Generation
 - Use templates from `templates/` directory
@@ -310,23 +322,21 @@ See `references/container-security/docker-guide.md` for best practices and examp
 
 ### Prioritization Framework
 When multiple issues exist, prioritize by:
-1. **Critical**: Active vulnerabilities, missing auth, exposed secrets
-2. **High**: No SECURITY.md, no branch protection, outdated dependencies with CVEs
-3. **Medium**: Missing SBOM, no automated scanning, unsigned releases
-4. **Low**: Documentation gaps, missing CODEOWNERS, cosmetic improvements
+1. **Critical**: Verified active exposure or known exploitable critical vulnerability
+2. **High**: Applicable weaknesses with credible impact; missing reporting path is an accessible early action, not an active compromise
+3. **Medium**: Additional scanning or artifacts when useful for this project's release model
+4. **Low**: Governance and documentation enhancements without evidence of urgent risk
 
 ## Quick Start Recommendations
 
-For a new project without security artifacts, recommend this order:
-1. Create `SECURITY.md` (5 minutes) - establishes vulnerability reporting
-2. Enable branch protection (5 minutes) - prevents accidental pushes to main
-3. Set up Dependabot (5 minutes) - automated dependency updates
-4. Add secrets scanning pre-commit hook (10 minutes) - prevents credential leaks
-5. Add OpenSSF Scorecard workflow (10 minutes) - continuous security monitoring
-6. Create initial threat model (30-60 minutes) - understand security landscape
-7. Set up SBOM generation (15 minutes) - supply chain transparency
-8. Sign release artifacts with Cosign (15 minutes) - artifact authenticity
-9. Implement remaining OSPS Baseline Level 1 requirements
+For a new project, first ask about any known incident or vulnerable dependency;
+remediate that immediately if present. Otherwise pick one achievable action:
+draft `SECURITY.md` with a private reporting channel, review known advisories
+for dependencies, or run one targeted scan if a suitable tool is already
+available. Then improve reviews and dependency updates in the project's actual
+forge/CI. Consider Scorecard, threat models, SPDX SBOM generation, signing and
+versioned Baseline conformance as relevant to the project; none is a prerequisite
+for the first improvement.
 
 ## When to hand off to audit
 
