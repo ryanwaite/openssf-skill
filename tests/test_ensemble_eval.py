@@ -3,6 +3,7 @@
 import importlib.util
 import json
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -79,6 +80,15 @@ class TestFusion(unittest.TestCase):
         self.assertFalse(ee.fuse([sig("maintenance", 0, raw={"archived": True})],
                                  "consume")["escalations"])
 
+    def test_critical_fix_blocks_even_without_base_score(self):
+        unknown = sig("known_vulns", None, status="unknown", raw={"findings": [
+            {"severity": "CRITICAL", "fixed_versions": ["2.0"]}]})
+        result = ee.fuse([unknown], "consume")
+        self.assertEqual(result["outcome"], "Avoid")
+        self.assertIsNone(result["base_score"])
+        self.assertIsNone(result["final_score"])
+        self.assertEqual(result["cap_applied"], "Unpatched CRITICAL vulnerability with fix")
+
     def test_reject_invalid_or_duplicate_scores(self):
         for signals in ([sig("maintenance", 101)], [sig("maintenance", float("nan"))],
                         [sig("maintenance", None)], [sig("maintenance", 50),
@@ -147,14 +157,91 @@ class TestAdapters(unittest.TestCase):
         vector = "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"
         data = {"results": [{"source": {"path": "a.lock"}, "packages": [{
             "package": {"name": "demo", "version": "1", "ecosystem": "npm"},
-            "vulnerabilities": [{"id": "CVE-123", "severity": [{"score": vector}]}],
+            "vulnerabilities": [{"id": "CVE-123",
+                                  "severity": [{"type": "CVSS_V3", "score": vector}]}],
+        }]}]}
+        def absent_cvss(cmd, timeout=180):
+            if cmd[0] == sys.executable:
+                self.assertEqual(cmd[1], "-I")
+                return process(3)
+            return process(1, json.dumps(data))
+
+        with patch.object(ee, "_have", return_value=True), \
+                patch.object(ee, "_run", side_effect=absent_cvss):
+            result = ee.probe_known_vulns(".", True)
+        self.assertEqual(result["status"], "unknown")
+        self.assertIsNone(result["subscore"])
+        self.assertEqual(result["raw"]["findings"][0]["severity"], None)
+        self.assertEqual(result["raw"]["findings"][0]["severity_status"], "parser_unavailable")
+        self.assertIn("optional", result["finding"])
+
+    @unittest.skipUnless(importlib.util.find_spec("cvss"), "Install optional cvss==3.6")
+    def test_cvss3_vector_98_critical_and_conflicting_lower_bucket(self):
+        vector = "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"
+        severity, base, status = ee._severity({
+            "severity": [{"type": "CVSS_V3", "score": vector}],
+            "database_specific": {"severity": "MEDIUM"},
+        })
+        self.assertEqual((severity, base, status), ("CRITICAL", 9.8, "known"))
+        data = {"results": [{"source": {"path": "a.lock"}, "packages": [{
+            "package": {"name": "demo", "version": "1", "ecosystem": "npm"},
+            "vulnerabilities": [{"id": "CVE-123", "severity": [
+                {"type": "CVSS_V3", "score": vector}],
+                "affected": [{"ranges": [{"events": [{"fixed": "2"}]}]}]}],
+        }]}]}
+        original_run = ee._run
+
+        def scanner(cmd, timeout=180):
+            return (original_run(cmd, timeout) if cmd[0] == sys.executable
+                    else process(1, json.dumps(data)))
+
+        with patch.object(ee, "_have", return_value=True), \
+                patch.object(ee, "_run", side_effect=scanner):
+            result = ee.probe_known_vulns(".", True)
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["subscore"], 20)
+        self.assertEqual(result["raw"]["findings"][0]["cvss_base_score"], 9.8)
+        self.assertEqual(result["raw"]["findings"][0]["severity"], "CRITICAL")
+
+    @unittest.skipUnless(importlib.util.find_spec("cvss"), "Install optional cvss==3.6")
+    def test_cvss4_vector_and_malformed_conflicting_evidence(self):
+        vector = "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:H/VA:H/SC:H/SI:H/SA:N"
+        self.assertEqual(ee._severity({"severity": [{"type": "CVSS_V4", "score": vector}]}),
+                         ("CRITICAL", 9.9, "known"))
+        zero = "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:N"
+        self.assertEqual(ee._severity({"severity": [{"type": "CVSS_V3", "score": zero}]}),
+                         ("NONE", 0.0, "known"))
+        severity, base, status = ee._severity({
+            "severity": [{"type": "CVSS_V3", "score": "CVSS:3.1/AV:N"}],
+            "database_specific": {"severity": "LOW"},
+        })
+        self.assertEqual((severity, base, status), (None, None, "malformed_vector"))
+
+    def test_missing_and_unsupported_vector_remain_unknown(self):
+        self.assertEqual(ee._severity({}), (None, None, "missing"))
+        severity, base, status = ee._severity({"severity": [
+            {"type": "CVSS_V3", "score": "CVSS:9.9/AV:N"}]})
+        self.assertEqual((severity, base, status), (None, None, "unsupported_vector"))
+
+    def test_partial_severity_keeps_supported_critical_fix_cap(self):
+        data = {"results": [{"source": {"path": "a.lock"}, "packages": [{
+            "package": {"name": "demo", "version": "1", "ecosystem": "npm"},
+            "vulnerabilities": [{
+                "id": "CVE-123",
+                "severity": [{"type": "CVSS_V3", "score": "9.8"},
+                             {"type": "CVSS_V3", "score": "CVSS:9.9/AV:N"}],
+                "affected": [{"ranges": [{"events": [{"fixed": "2"}]}]}],
+            }],
         }]}]}
         with patch.object(ee, "_have", return_value=True), \
                 patch.object(ee, "_run", return_value=process(1, json.dumps(data))):
             result = ee.probe_known_vulns(".", True)
         self.assertEqual(result["status"], "unknown")
         self.assertIsNone(result["subscore"])
-        self.assertEqual(result["raw"]["findings"][0]["severity"], None)
+        self.assertEqual(result["raw"]["findings"][0]["severity"], "CRITICAL")
+        verdict = ee.fuse([result], "consume")
+        self.assertEqual(verdict["outcome"], "Avoid")
+        self.assertEqual(verdict["cap_applied"], "Unpatched CRITICAL vulnerability with fix")
 
     def test_package_target_not_passed_as_lockfile(self):
         with patch.object(ee, "_have", return_value=True), \
@@ -256,6 +343,8 @@ class TestEvidence(unittest.TestCase):
             with patch.object(ee, "_run") as run:
                 self.assertEqual(ee.replay(snapshot), report)
                 run.assert_not_called()
+            Path(target).rmdir()
+            self.assertEqual(ee.replay(snapshot), report)
             cli = subprocess.run(
                 ["python3", str(Path(ee.__file__)), "--replay", str(snapshot),
                  "--at", AT, "--format", "json"],
@@ -267,6 +356,39 @@ class TestEvidence(unittest.TestCase):
             evidence.write_text(json.dumps(data))
             with self.assertRaises(ValueError):
                 ee._import_evidence(evidence, target, "produce")
+
+    def test_codeowners_proxy_reconciles_manual_review_evidence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = str(Path(directory) / "target")
+            Path(target).mkdir()
+            (Path(target) / "CODEOWNERS").write_text("* @maintainer\n")
+            evidence = Path(directory) / "evidence.json"
+            evidence.write_text(json.dumps({
+                "schema_version": 1, "target": target, "mode": "produce",
+                "observations": [{
+                    "name": "code_review", "evidence_type": "manual_observation",
+                    "facts": {"required_reviews": True, "protected_default_branch": True},
+                    "source": "branch settings reviewed", "captured_at": AT,
+                    "tool": {"name": "manual", "version": "1"},
+                }],
+            }))
+            with patch.object(ee, "_have", return_value=False):
+                report = ee.evaluate(target, "produce", evidence, evaluated_at=AT)
+            code_review = next(s for s in report["signals"] if s["name"] == "code_review")
+            self.assertEqual(code_review["subscore"], 100)
+            self.assertEqual(code_review["confidence"], "low")
+            self.assertIn("CODEOWNERS", code_review["evidence_note"])
+            self.assertIn("Evidence reconciliation", ee.to_markdown(report))
+            submitted = json.loads(evidence.read_text())
+            submitted["observations"][0]["evidence_type"] = "self_report"
+            evidence.write_text(json.dumps(submitted))
+            with patch.object(ee, "_have", return_value=False):
+                self_report = ee.evaluate(target, "produce", evidence, evaluated_at=AT)
+            code_review = next(s for s in self_report["signals"]
+                               if s["name"] == "code_review")
+            self.assertEqual(code_review["subscore"], 50)
+            self.assertEqual(code_review["related_evidence"][0]["evidence_type"],
+                             "self_report")
 
     def test_self_report_does_not_count_as_verified(self):
         item = {"name": "provenance", "facts": {"slsa_level": 3},

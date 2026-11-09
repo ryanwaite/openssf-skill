@@ -67,6 +67,15 @@ Rules:
 - OSV source scanning requires a **local path** in this first wave. A package
   spec or repo URL is not a lockfile; resolve it explicitly in later work or
   manually inspect exact-version advisories now.
+- OSV vector-only CVSS2/3/4 severity can be computed with the maintained
+  optional `cvss==3.6` parser:
+  `python3 -m pip install -r skills/audit/requirements-optional.txt`.
+  This is **not** required for stdlib-only inventory, manual evidence, or
+  remediation. Missing/malformed/unsupported vectors remain unscored and
+  surfaced as unknown, never silently MEDIUM. The third-party `cvss` package
+  is licensed LGPLv3+; see
+  [its license](https://github.com/RedHatProductSecurity/cvss/blob/v3.6/LICENSE).
+  It is not vendored, and this project's license does not change.
 
 ### Manual evidence and reproducibility
 
@@ -111,7 +120,11 @@ The JSON contains `schema_version`, `policy_version`, `target`,
 `target_kind`, `target_identity`, `mode`, `evaluated_at`, `signals`, `verdict`,
 `gaps`, and `actions`. Each signal includes status, subscore, evidence type,
 source, timestamp, tool name/version, and sanitized findings. Replay performs
-no scanner calls; the policy version must match.
+no scanner calls or target filesystem checks, and retains captured actions
+(including the evaluator's installed skill path); the policy version must match.
+When manual branch-review evidence is imported alongside local CODEOWNERS,
+the manual observation replaces only the CODEOWNERS proxy; reconciliation
+appears in `evidence_note` and the Markdown report.
 
 ### Step 3 — Fuse signals into a weighted verdict
 Apply **`ensemble/risk-model.md`** exactly:
@@ -144,7 +157,7 @@ orchestrator owns the *fusion*; the references own the *how*.
 
 ## Golden rules
 - One verdict, not a scoreboard.
-- Mode changes the weights, not the tools.
+- Mode determines applicable weighted probes; do not score unweighted probes.
 - Unknown ≠ fine. Missing data lowers confidence.
 - Every claim cites a tool. Every verdict shows its math.
 - Evidence needed for assurance is not a prerequisite to make progress:

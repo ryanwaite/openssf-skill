@@ -40,7 +40,7 @@ inventory, manual review, or immediate remediation.
 | Signal | Source tool(s) | Normalization |
 |--------|----------------|---------------|
 | `scorecard` | OpenSSF Scorecard | `subscore = scorecard_aggregate * 10` (0–10 → 0–100) |
-| `known_vulns` | OSV-Scanner for local source | Start at 100. Subtract 40 per CRITICAL, 20 per HIGH, 8 per MEDIUM, 2 per LOW **advisory group per affected package/version**. Floor at 0. A documented fixed version doubles that finding's deduction. Unknown severity prevents a scored clean result. Numeric CVSS 0–10 and explicit advisory severity buckets are supported; vector-only severity is unknown until assessed with a maintained calculator/tool. |
+| `known_vulns` | OSV-Scanner for local source | Start at 100. Subtract 40 per CRITICAL, 20 per HIGH, 8 per MEDIUM, 2 per LOW, 0 per NONE (CVSS 0) **advisory group per affected package/version**. Floor at 0. A documented fixed version doubles that finding's deduction. Unknown severity prevents a scored clean result. Numeric CVSS 0–10 and explicit advisory severity buckets are supported; optional `cvss==3.6` calculates CVSS2/3/4 vectors (base score only) in an isolated interpreter. Missing extra, malformed/unsupported vectors, and contradictory uncomputable vectors remain unknown, not MEDIUM. When computed and explicit buckets conflict, retain the higher severity; an independently supported CRITICAL fact still triggers its cap even if another severity entry is unresolved. |
 | `maintenance` | Repo metadata | Full policy: 100 if released ≤3mo AND ≥2 active maintainers. −25 if last release 3–12mo; −50 if >12mo; −25 if bus factor = 1; −100 if archived/EOL (floor 0). Current runner only has a *low/medium-confidence commit/push recency proxy* (100 ≤90d, 75 ≤365d, 50 older, or 0 archived). It must not claim release cadence or maintainer count from a push. |
 | `supply_chain` | SBOM + transitive analysis | 100 minus 5 per direct dependency with its own CRITICAL/HIGH CVE, minus 2 per deep (transitive) one. Floor 0. Pinned + lockfile present adds +10 (cap 100). |
 | `provenance` | SLSA level, Sigstore/Cosign verify | SLSA L3=100, L2=70, L1=40, L0/none=10. +0 but flips `signing_verified` flag used by escalation rules. |
@@ -101,8 +101,10 @@ contribution, plus weighted coverage. If no weighted signal was scored,
 reported as **INCOMPLETE** with a separately labeled `provisional_outcome`
 (not an adoption recommendation or grade). This first-wave rule avoids
 inventing a numerical threshold or new core-probe set. A supported negative
-cap can still report Avoid/F on partial evidence; missing
-evidence never erases an independently supported adverse fact. `INCOMPLETE`
+cap can still report Avoid/F on partial evidence, even when the numeric base
+remains null. In that case the cap rule determines the outcome, but no numeric
+final score is fabricated. Missing evidence never erases an independently
+supported adverse fact. `INCOMPLETE`
 is usable output, not a CLI failure.
 
 ---

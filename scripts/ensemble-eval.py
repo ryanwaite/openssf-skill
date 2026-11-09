@@ -28,8 +28,10 @@ from datetime import datetime, timezone
 import json
 import math
 import re
+import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -56,7 +58,8 @@ MODE_WEIGHTS: Dict[str, Dict[str, float]] = {
     },
 }
 
-SEVERITY_DEDUCTION = {"CRITICAL": 40, "HIGH": 20, "MEDIUM": 8, "LOW": 2}
+SEVERITY_DEDUCTION = {"CRITICAL": 40, "HIGH": 20, "MEDIUM": 8, "LOW": 2,
+                      "NONE": 0}
 SCHEMA_VERSION = 1
 POLICY_VERSION = "1"
 
@@ -132,31 +135,94 @@ def probe_scorecard(target: str, is_repo: bool) -> Dict[str, Any]:
                   f"Scorecard aggregate {agg}/10.", raw={"aggregate": agg})
 
 
-def _severity(vuln: Dict[str, Any]) -> Optional[str]:
-    """Use published severity buckets or numeric CVSS, never guess from a vector."""
+def _cvss_vector_score(vector: str, kind: str) -> tuple:
+    """Return a vetted parser's base score or a non-scoring reason."""
+    versions = {"CVSS_V2": (("AV:",), "CVSS2"),
+                "CVSS_V3": (("CVSS:3.0/", "CVSS:3.1/"), "CVSS3"),
+                "CVSS_V4": (("CVSS:4.0/",), "CVSS4")}
+    if kind not in versions:
+        return None, "unsupported_vector"
+    prefixes, parser_name = versions[kind]
+    if len(vector) > 512 or not vector.startswith(prefixes):
+        return None, "unsupported_vector"
+    code = (
+        "import sys\n"
+        "from importlib.metadata import PackageNotFoundError, version\n"
+        "try:\n"
+        "    if version('cvss') != '3.6':\n"
+        "        raise PackageNotFoundError\n"
+        "    from cvss import CVSS2, CVSS3, CVSS4\n"
+        "    from cvss.exceptions import CVSSError\n"
+        "except (ImportError, PackageNotFoundError):\n"
+        "    sys.exit(3)\n"
+        "try:\n"
+        "    print(globals()[sys.argv[1]](sys.argv[2]).scores()[0])\n"
+        "except CVSSError:\n"
+        "    sys.exit(4)\n"
+    )
+    proc = _run([sys.executable, "-I", "-c", code, parser_name, vector], timeout=10)
+    if proc is None or proc.returncode == 3:
+        return None, "parser_unavailable"
+    if proc.returncode == 4:
+        return None, "malformed_vector"
+    if proc.returncode != 0:
+        return None, "parser_error"
+    try:
+        score = float(proc.stdout.strip()) if len(proc.stdout) <= 32 else float("nan")
+    except ValueError:
+        return None, "invalid_computed_score"
+    if not isinstance(score, (int, float)) or not math.isfinite(score) \
+            or not 0 <= score <= 10:
+        return None, "invalid_computed_score"
+    return float(score), "computed"
+
+
+def _severity(vuln: Dict[str, Any]) -> tuple:
+    """Use published buckets/numeric CVSS or a vetted optional vector parser."""
     buckets = []
+    base_scores = []
+    unresolved = []
     severities = vuln.get("severity", [])
     if not isinstance(severities, list):
         raise ValueError("Invalid severity list")
     for item in severities:
         if not isinstance(item, dict):
-            continue
+            raise ValueError("Invalid severity entry")
         value = item.get("score")
-        if item.get("type") in ("CVSS_V2", "CVSS_V3", "CVSS_V4") and (
-                isinstance(value, (int, float)) or (
-                    isinstance(value, str) and value.replace(".", "", 1).isdigit())):
-            number = float(value)
-            if math.isfinite(number) and 0 <= number <= 10:
-                buckets.append("CRITICAL" if item["type"] != "CVSS_V2" and number >= 9
-                               else "HIGH" if number >= 7 else "MEDIUM" if number >= 4
-                               else "LOW")
+        kind = item.get("type")
+        if kind not in ("CVSS_V2", "CVSS_V3", "CVSS_V4"):
+            unresolved.append("unsupported_type")
+            continue
+        if isinstance(value, str) and value.replace(".", "", 1).isdigit():
+            number, status = float(value), "reported"
+        elif isinstance(value, (int, float)) and not isinstance(value, bool):
+            number, status = float(value), "reported"
+        elif isinstance(value, str):
+            number, status = _cvss_vector_score(value, kind)
+        else:
+            number, status = None, "missing_score"
+        if number is None or not math.isfinite(number) or not 0 <= number <= 10:
+            unresolved.append(status if number is None else "invalid_score")
+            continue
+        base_scores.append(number)
+        buckets.append("NONE" if number == 0 else
+                       "CRITICAL" if kind != "CVSS_V2" and number >= 9
+                       else "HIGH" if number >= 7 else "MEDIUM" if number >= 4
+                       else "LOW")
     for field in ("database_specific", "ecosystem_specific"):
         detail = vuln.get(field) or {}
         if isinstance(detail, dict):
             bucket = detail.get("severity")
             if isinstance(bucket, str) and bucket.upper() in SEVERITY_DEDUCTION:
                 buckets.append(bucket.upper())
-    return max(buckets, key=lambda bucket: SEVERITY_DEDUCTION[bucket]) if buckets else None
+    if unresolved:
+        # Preserve an independently supported blocking CRITICAL fact while
+        # keeping the overall severity status unresolved and unscored.
+        return ("CRITICAL" if "CRITICAL" in buckets else None,
+                max(base_scores, default=None), sorted(unresolved)[0])
+    return (max(buckets, key=lambda bucket: SEVERITY_DEDUCTION[bucket])
+            if buckets else None,
+            max(base_scores, default=None), "known" if buckets else "missing")
 
 
 def _affected_ranges(vuln: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -228,7 +294,7 @@ def _osv_findings(data: Dict[str, Any]) -> List[Dict[str, Any]]:
                 for group in group_ids:
                     if ids & group:
                         ids.update(group)
-                severity = _severity(vuln)
+                severity, base_score, severity_status = _severity(vuln)
                 affected = _affected_ranges(vuln)
                 fixes = [event["fixed"] for item in affected for event in item["events"]
                          if "fixed" in event]
@@ -239,6 +305,10 @@ def _osv_findings(data: Dict[str, Any]) -> List[Dict[str, Any]]:
                     affected.extend(old["affected_ranges"])
                     severity = max((x for x in (severity, old["severity"]) if x),
                                    key=lambda x: SEVERITY_DEDUCTION[x], default=None)
+                    base_score = max((x for x in (base_score, old["cvss_base_score"])
+                                      if x is not None), default=None)
+                    if severity_status == "known":
+                        severity_status = old["severity_status"]
                     bucket.remove(old)
                 paths = {source["path"]}
                 for old in matching:
@@ -246,6 +316,8 @@ def _osv_findings(data: Dict[str, Any]) -> List[Dict[str, Any]]:
                 bucket.append({"id": sorted(ids)[0], "aliases": sorted(ids),
                                "ecosystem": key[0], "package": key[1],
                                "version": key[2], "severity": severity,
+                               "cvss_base_score": base_score,
+                               "severity_status": severity_status,
                                "fixed_versions": sorted(set(fixes)),
                                "fix_status": "available" if fixes else "unknown",
                                "affected_ranges": [json.loads(item) for item in sorted(
@@ -267,7 +339,7 @@ def probe_known_vulns(target: str, is_local: bool) -> Dict[str, Any]:
     if proc is None or proc.returncode not in (0, 1) or not proc.stdout.strip():
         return signal("known_vulns", "error", None, "low",
                       "OSV-Scanner failed or produced no JSON; no clean result inferred.")
-    counts = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0}
+    counts = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0, "NONE": 0}
     try:
         data = json.loads(proc.stdout)
         if not isinstance(data, dict) or not isinstance(data.get("results"), list):
@@ -280,7 +352,7 @@ def probe_known_vulns(target: str, is_local: bool) -> Dict[str, Any]:
         if (proc.returncode == 0 and findings) or (proc.returncode == 1 and not findings):
             raise ValueError("Exit/output mismatch")
         for finding in findings:
-            if finding["severity"]:
+            if finding["severity"] and finding["severity_status"] == "known":
                 counts[finding["severity"]] += 1
     except (json.JSONDecodeError, TypeError, ValueError, KeyError):
         return signal("known_vulns", "error", None, "low",
@@ -291,13 +363,16 @@ def probe_known_vulns(target: str, is_local: bool) -> Dict[str, Any]:
                      (2 if finding["fixed_versions"] else 1)
                      for finding in findings if finding["severity"] == sev)
     score = max(0, score)
-    unknown = len(findings) - sum(counts.values())
+    unknown = sum(f["severity_status"] != "known" for f in findings)
     return signal("known_vulns", "ok" if not unknown else "unknown",
                   score if not unknown else None, "high" if not unknown else "low",
                   f"{len(findings)} advisory group(s) ({counts['CRITICAL']}C/"
                   f"{counts['HIGH']}H/{counts['MEDIUM']}M/{counts['LOW']}L/"
+                  f"{counts['NONE']}N/"
                   f"{unknown} unknown severity); "
-                  + ("verify unknown severities before scoring." if unknown else
+                  + ("verify unknown severities before scoring; optional "
+                     "`cvss==3.6` calculates supported vectors, while malformed "
+                     "or missing data needs manual review." if unknown else
                      "Severity and fix data from OSV-Scanner."),
                   raw={"counts": counts, "findings": findings},
                   source="OSV-Scanner", tool={"name": "osv-scanner", "version": "unrecorded"})
@@ -465,6 +540,8 @@ def fuse(signals: List[Dict[str, Any]], mode: str) -> Dict[str, Any]:
             capped, cap_label = 0, esc["rule"]
             break
         ceiling = caps[level]
+        if capped is None and (level == "high" or cap_label is None):
+            cap_label = esc["rule"]
         if capped is not None and capped > ceiling:
             capped, cap_label = ceiling, esc["rule"]
 
@@ -528,6 +605,8 @@ def _escalations(signals: List[Dict[str, Any]]) -> List[Dict[str, str]]:
 
 def _outcome(score: Optional[float], mode: str,
              escalations: List[Dict[str, str]]) -> str:
+    if any(e["caps_at"] in ("critical", "high") for e in escalations):
+        return "Avoid" if mode == "consume" else "F"
     if score is None:
         return "INSUFFICIENT DATA"
     if mode == "consume":
@@ -663,7 +742,8 @@ def _import_evidence(path: Path, target: str, mode: str) -> Dict[str, Dict[str, 
     return result
 
 
-def _actions(signals: List[Dict[str, Any]], target: str) -> List[str]:
+def _actions(signals: List[Dict[str, Any]], target: str,
+             target_kind: str) -> List[str]:
     actions = []
     for s in signals:
         if s["name"] == "secrets" and s["status"] == "ok" \
@@ -678,9 +758,11 @@ def _actions(signals: List[Dict[str, Any]], target: str) -> List[str]:
                     actions.append(f"Investigate {f['id']} in {f['package']}@{f['version']}; "
                                    "confirm severity and available fixes.")
     if not actions:
-        if Path(target).exists():
+        if target_kind == "local":
+            inventory = Path(__file__).resolve().with_name("assess-project.py")
             actions.append("Inventory local dependencies and existing security artifacts "
-                           "with `python3 scripts/assess-project.py <path>`; review "
+                           f"with `python3 {shlex.quote(str(inventory))} "
+                           f"{shlex.quote(target)}`; review "
                            "the highest-impact finding before installing optional scanners.")
         else:
             actions.append("Identify the exact upstream artifact and dependency version; "
@@ -689,7 +771,8 @@ def _actions(signals: List[Dict[str, Any]], target: str) -> List[str]:
 
 
 def _report(target: str, mode: str, signals: List[Dict[str, Any]],
-            evaluated_at: str) -> Dict[str, Any]:
+            evaluated_at: str, target_kind: str,
+            target_identity: Dict[str, Any]) -> Dict[str, Any]:
     at = _utc(evaluated_at)
     for s in signals:
         captured = s.get("captured_at")
@@ -699,14 +782,13 @@ def _report(target: str, mode: str, signals: List[Dict[str, Any]],
     return {
         "schema_version": SCHEMA_VERSION, "policy_version": POLICY_VERSION,
         "target": target,
-        "target_kind": "local" if Path(target).exists() else
-                       ("repo" if classify_target(target)["is_repo"] else "package"),
-        "target_identity": {"requested": target, "resolved": False},
+        "target_kind": target_kind,
+        "target_identity": target_identity,
         "mode": mode, "evaluated_at": evaluated_at,
         "signals": signals, "verdict": verdict,
         "gaps": [{"signal": s["name"], "reason": s["finding"]}
                  for s in signals if s["status"] != "ok"],
-        "actions": _actions(signals, target),
+        "actions": _actions(signals, target, target_kind),
     }
 
 
@@ -735,8 +817,30 @@ def evaluate(target: str, mode: str, evidence: Optional[Path] = None,
 
     if evidence:
         imported = _import_evidence(evidence, target, mode)
-        signals = [imported.get(s["name"], s) if s["status"] != "ok" else s
-                   for s in signals]
+        merged = []
+        for s in signals:
+            observation = imported.get(s["name"])
+            if not observation:
+                merged.append(s)
+            elif s["status"] != "ok":
+                merged.append(observation)
+            elif s["name"] == "code_review" and observation["status"] == "ok":
+                observation["finding"] += (" Local CODEOWNERS presence also observed; "
+                                           "this replaces only the CODEOWNERS proxy.")
+                observation["evidence_note"] = "Manual observation reconciled with local CODEOWNERS."
+                observation["related_evidence"] = [{
+                    "evidence_type": s["evidence_type"], "source": s["source"],
+                    "finding": s["finding"], "captured_at": s["captured_at"],
+                }]
+                merged.append(observation)
+            elif s["name"] == "code_review" and observation["status"] == "unknown":
+                s["evidence_note"] = ("Self-report received but not scored; "
+                                      "local CODEOWNERS proxy retained.")
+                s["related_evidence"] = [observation]
+                merged.append(s)
+            else:
+                raise ValueError("Manual evidence conflicts with an already measured signal")
+        signals = merged
     for s in signals:
         if s["status"] == "ok" and not s["captured_at"]:
             s["captured_at"] = evaluated_at
@@ -749,7 +853,9 @@ def evaluate(target: str, mode: str, evidence: Optional[Path] = None,
                              else "not applicable"}
         elif s["status"] == "ok" and s["tool"]["version"] == "unrecorded":
             s["tool"]["version"] = _tool_version(s["tool"]["name"])
-    return _report(target, mode, signals, evaluated_at)
+    target_kind = "local" if is_local else ("repo" if is_repo else "package")
+    return _report(target, mode, signals, evaluated_at, target_kind,
+                   {"requested": target, "resolved": False})
 
 
 def replay(snapshot: Path, evaluated_at: Optional[str] = None) -> Dict[str, Any]:
@@ -763,12 +869,16 @@ def replay(snapshot: Path, evaluated_at: Optional[str] = None) -> Dict[str, Any]
     _utc(at)
     if not all(isinstance(s, dict) for s in data["signals"]):
         raise ValueError("Invalid snapshot signal")
-    report = _report(data["target"], data["mode"], data["signals"], at)
     if data.get("target_kind") not in ("local", "repo", "package") or \
             not isinstance(data.get("target_identity"), dict):
         raise ValueError("Snapshot target identity missing")
-    report["target_kind"] = data["target_kind"]
-    report["target_identity"] = data["target_identity"]
+    report = _report(data["target"], data["mode"], data["signals"], at,
+                     data["target_kind"], data["target_identity"])
+    # Actions belong to the captured run, including its installed skill path.
+    if not isinstance(data.get("actions"), list) or not all(
+            isinstance(action, str) for action in data["actions"]):
+        raise ValueError("Snapshot actions missing")
+    report["actions"] = data["actions"]
     return report
 
 
@@ -783,7 +893,7 @@ def _risks(signals: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if s["name"] == "known_vulns" and isinstance(s.get("raw"), dict):
             for f in s["raw"].get("findings", []):
                 severity = f["severity"]
-                if severity:
+                if severity and severity != "NONE":
                     # Exposure is not resolved yet: conservative direct/production
                     # assumption, explicitly disclosed in the report.
                     rank = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1}[severity] \
@@ -834,6 +944,8 @@ def to_markdown(report: Dict[str, Any]) -> str:
                   "The actions below can start now.", ""]
     if v["cap_applied"]:
         lines.append(f"_Escalation cap applied: {_md(v['cap_applied'])}_\n")
+        if v["base_score"] is None:
+            lines.append("The adverse cap determines the outcome without a numeric base score.\n")
     lines += ["## Evidence", "",
               "| Signal | Status | Sub-score | Original → effective weight | "
               "Contribution | Confidence | Source / time / age | Finding |",
@@ -857,6 +969,10 @@ def to_markdown(report: Dict[str, Any]) -> str:
               f"cap → {v['final_score'] if v['final_score'] is not None else 'n/a'}. "
               f"Escalations: {', '.join(e['rule'] for e in v['escalations']) or 'none'}.",
               "", "## Top risks (ranked)", ""]
+    notes = [f"- **{_md(s['name'])}:** {_md(s['evidence_note'])}"
+             for s in report["signals"] if s.get("evidence_note")]
+    if notes:
+        lines += ["", "**Evidence reconciliation:**", *notes, ""]
     risks = _risks(report["signals"])
     lines.extend(f"{i}. **{_md(r['finding'])}** — {_md(r['source'])}; "
                  f"priority {_md(r['priority'] if r['priority'] is not None else 'unranked')}. "
@@ -878,6 +994,7 @@ def to_markdown(report: Dict[str, Any]) -> str:
                   "only the evidence relevant to your next decision; scanners are optional."]
     lines += ["", "## Provenance of this report", "",
               "Signals name their source, observation type, and capture time above. "
+              "Any evidence reconciliation is recorded per signal as `evidence_note`. "
               "Manual observations and self-reports are not independent verification. "
               "Scanner diagnostics and secret contents are never included. "
               "This is a custom risk heuristic, not OpenSSF certification."]
