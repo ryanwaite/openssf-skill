@@ -2,6 +2,7 @@
 
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -25,6 +26,15 @@ def sig(name, subscore, status="ok", raw=None, confidence="high", evidence_type=
 
 def process(code, stdout="", stderr=""):
     return subprocess.CompletedProcess([], code, stdout, stderr)
+
+
+def scorecard_result(commit="a" * 40, date=AT):
+    return {
+        "date": date, "repo": {"name": "github.com/example/repo", "commit": commit},
+        "scorecard": {"version": "v5.6.0", "commit": "f" * 40}, "score": 9.2,
+        "checks": [{"name": name, "score": 10, "reason": "observed", "details": None}
+                   for name in sorted(ee._SCORECARD_CHECKS)],
+    }
 
 
 class TestFusion(unittest.TestCase):
@@ -117,12 +127,169 @@ class TestAdapters(unittest.TestCase):
 
     def test_scorecard_missing_or_out_of_range_aggregate_not_observed(self):
         with patch.object(ee, "_have", return_value=True):
-            for raw in ('{}', '{"score": -1}', '{"score": 11}'):
+            for raw in ('{}', '{"score": -1}', '{"score": 11}',
+                        '{"score": true}', '{"score": NaN}', '{"score": null}'):
                 with self.subTest(raw=raw), \
                         patch.object(ee, "_run", return_value=process(0, raw)):
                     result = ee.probe_scorecard("https://github.com/example/repo", True)
                     self.assertEqual(result["status"], "error")
                     self.assertIsNone(result["subscore"])
+
+    def test_scorecard_checks_revision_and_freshness(self):
+        identity = ee.resolve_target("example/repo@" + "a" * 40)
+        data = scorecard_result()
+        failed = next(c for c in data["checks"] if c["name"] == "Dangerous-Workflow")
+        failed.update(score=0, reason="dangerous checkout", details=["workflow.yml:12"])
+        with patch.object(ee, "_have", return_value=True), \
+                patch.object(ee, "_run", return_value=process(0, json.dumps(data))) as run:
+            result = ee.probe_scorecard(identity["requested"], True, identity, "produce", AT)
+        self.assertEqual(result["status"], "ok")
+        self.assertLess(result["subscore"], 100)
+        self.assertEqual(result["raw"]["aggregate"], 9.2)
+        self.assertEqual(result["raw"]["commit"], "a" * 40)
+        self.assertEqual(failed["details"], ["workflow.yml:12"])
+        self.assertIn("--commit=" + "a" * 40, run.call_args.args[0])
+        report = ee._report(identity["requested"], "produce", [result], AT,
+                            "repo", identity)
+        self.assertIn("dangerous checkout", ee.to_markdown(report))
+        self.assertIn("Dangerous-Workflow", report["actions"][0])
+        self.assertIn("Scorecard Dangerous-Workflow", ee._risks([result])[0]["finding"])
+        data["repo"]["commit"] = "b" * 40
+        with patch.object(ee, "_have", return_value=True), \
+                patch.object(ee, "_run", return_value=process(0, json.dumps(data))):
+            mismatched = ee.probe_scorecard(identity["requested"], True, identity, "produce", AT)
+        self.assertEqual(mismatched["status"], "unknown")
+        self.assertIn("different commit", mismatched["finding"])
+        data["repo"]["commit"] = "a" * 40
+        for field in ("date", "commit"):
+            altered = json.loads(json.dumps(data))
+            if field == "date":
+                altered.pop("date")
+            else:
+                altered["repo"].pop("commit")
+            with self.subTest(field=field), patch.object(ee, "_have", return_value=True), \
+                    patch.object(ee, "_run", return_value=process(0, json.dumps(altered))):
+                result = ee.probe_scorecard(identity["requested"], True, identity, "produce", AT)
+                self.assertEqual(result["status"], "unknown")
+        data["date"] = "2026-01-01T00:00:00Z"
+        with patch.object(ee, "_have", return_value=True), \
+                patch.object(ee, "_run", return_value=process(0, json.dumps(data))):
+            stale = ee.probe_scorecard(identity["requested"], True, identity, "produce", AT)
+        self.assertEqual(stale["status"], "unknown")
+        self.assertIn("90 days", stale["finding"])
+
+    def test_scorecard_unavailable_and_omitted_checks_do_not_score(self):
+        identity = ee.resolve_target("example/repo")
+        for mutate in (
+                lambda d: d["checks"][0].update(score=-1, reason="permission denied"),
+                lambda d: d["checks"].pop(),
+        ):
+            data = scorecard_result()
+            mutate(data)
+            with patch.object(ee, "_have", return_value=True), \
+                    patch.object(ee, "_run", return_value=process(0, json.dumps(data))):
+                result = ee.probe_scorecard(identity["requested"], True, identity, "consume", AT)
+            self.assertEqual(result["status"], "unknown")
+            self.assertIsNone(result["subscore"])
+            self.assertTrue(result["raw"]["checks"])
+        data = scorecard_result()
+        data["checks"][0]["score"] = True
+        with patch.object(ee, "_have", return_value=True), \
+                patch.object(ee, "_run", return_value=process(0, json.dumps(data))):
+            self.assertEqual(ee.probe_scorecard(identity["requested"], True,
+                                                identity, "consume", AT)["status"], "error")
+
+    def test_dirty_local_origin_cannot_substitute_remote_scorecard(self):
+        identity = {"kind": "local_directory", "repo": "github.com/example/repo",
+                    "git_commit": "a" * 40, "git_dirty": True}
+        with patch.object(ee, "_have", return_value=True), patch.object(ee, "_run") as run:
+            result = ee.probe_scorecard("./repo", False, identity, "produce", AT)
+        self.assertEqual(result["status"], "unknown")
+        self.assertIn("dirty", result["finding"])
+        run.assert_not_called()
+
+    def test_cli_mock_scanner_files_and_pinned_repo(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            lockfile = root / "package-lock.json"
+            lockfile.write_text('{"lockfileVersion":3}')
+            osv = root / "osv-scanner"
+            osv.write_text("#!/usr/bin/env python3\n"
+                           "import json, os, sys\n"
+                           "open(os.environ['COMMAND_LOG'], 'a').write(json.dumps(sys.argv[1:])+'\\n')\n"
+                           "print(json.dumps({'results':[{'source':{'path':'package-lock.json'},"
+                           "'packages':[{'package':{'name':'demo','version':'1',"
+                           "'ecosystem':'npm'},'vulnerabilities':[]}]}]}))\n")
+            osv.chmod(0o755)
+            scorecard = root / "scorecard"
+            scorecard.write_text("#!/usr/bin/env python3\n"
+                                 "import os, sys\n"
+                                 "open(os.environ['COMMAND_LOG'], 'a').write(repr(sys.argv[1:])+'\\n')\n"
+                                 f"print({json.dumps(json.dumps(scorecard_result()))})\n")
+            scorecard.chmod(0o755)
+            gh = root / "gh"
+            gh.write_text("#!/bin/sh\nexit 1\n")
+            gh.chmod(0o755)
+            command_log = root / "calls"
+            env = dict(os.environ, PATH=f"{root}:{os.environ['PATH']}",
+                       COMMAND_LOG=str(command_log))
+            cli = [sys.executable, str(Path(ee.__file__)), "--mode", "consume",
+                   "--at", AT]
+            local = subprocess.run(cli + ["--target", str(lockfile)], env=env,
+                                   check=True, capture_output=True, text=True)
+            local_data = json.loads(local.stdout)
+            self.assertEqual(local_data["target_kind"], "local_file")
+            self.assertEqual(next(s for s in local_data["signals"]
+                                  if s["name"] == "known_vulns")["subscore"], 100)
+            self.assertIn("--lockfile=:" + str(lockfile), command_log.read_text())
+            command_log.unlink()
+            remote = subprocess.run(cli + ["--target", "example/repo@" + "a" * 40],
+                                    env=env, check=True, capture_output=True, text=True)
+            remote_data = json.loads(remote.stdout)
+            self.assertEqual(next(s for s in remote_data["signals"]
+                                  if s["name"] == "scorecard")["status"], "ok")
+            self.assertEqual(next(s for s in remote_data["signals"]
+                                  if s["name"] == "known_vulns")["status"], "unknown")
+            self.assertIn("--commit=" + "a" * 40, command_log.read_text())
+            self.assertNotIn("osv-scanner", command_log.read_text())
+
+    def test_osv_file_uses_lockfile_or_sbom_flag_not_directory_scan(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for filename, flag in (("package-lock.json", "--lockfile=:"),
+                                   ("artifact.spdx.json", "-L")):
+                path = Path(directory) / filename
+                path.write_text("{}")
+                identity = ee.resolve_target(str(path))
+                with self.subTest(filename=filename), \
+                        patch.object(ee, "_have", return_value=True), \
+                        patch.object(ee, "_run", return_value=process(0, '{"results":[]}')) as run:
+                    result = ee.probe_known_vulns(str(path), True, identity)
+                self.assertEqual(result["status"], "unknown")
+                cmd = run.call_args.args[0]
+                self.assertIn("--no-call-analysis=go", cmd)
+                self.assertNotIn("--recursive", cmd)
+                if flag == "-L":
+                    self.assertEqual(cmd[-2:], ["-L", str(path)])
+                else:
+                    self.assertEqual(cmd[-1], flag + str(path))
+            for target in ("example/repo", "pkg:npm/name@1", "registry/app@sha256:" + "f" * 64):
+                with patch.object(ee, "_have", return_value=True), \
+                        patch.object(ee, "_run") as run:
+                    result = ee.evaluate(target, "consume", evaluated_at=AT,
+                                         ecosystem="npm" if target.startswith("pkg:") else None)
+                    self.assertNotEqual(next(s for s in result["signals"] if
+                                             s["name"] == "known_vulns")["status"], "ok")
+                    self.assertFalse(any(c.args[0][0] == "osv-scanner"
+                                         for c in run.call_args_list))
+
+    def test_osv_directory_preserves_source_scan_without_go_analysis(self):
+        with tempfile.TemporaryDirectory() as directory:
+            identity = ee.resolve_target(directory)
+            with patch.object(ee, "_have", return_value=True), \
+                    patch.object(ee, "_run", return_value=process(0, '{"results":[]}')) as run:
+                ee.probe_known_vulns(directory, True, identity)
+            self.assertEqual(run.call_args.args[0][-2:], ["--recursive", directory])
+            self.assertIn("--no-call-analysis=go", run.call_args.args[0])
 
     def test_osv_alias_group_dedup_fix_severity_and_identity(self):
         advisory = {
@@ -397,6 +564,23 @@ class TestEvidence(unittest.TestCase):
         result = ee._manual_signal(item)
         self.assertEqual(result["status"], "unknown")
         self.assertIsNone(result["subscore"])
+
+    def test_replay_legacy_scorecard_aggregate_without_checks(self):
+        legacy = {
+            "schema_version": 1, "policy_version": "1", "target": "example/repo",
+            "target_kind": "repo", "target_identity": {
+                "requested": "example/repo", "resolved": False},
+            "mode": "consume", "evaluated_at": AT,
+            "signals": [sig("scorecard", 92, raw={"aggregate": 9.2})],
+            "actions": ["Review source"],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            snapshot = Path(directory) / "snapshot.json"
+            snapshot.write_text(json.dumps(legacy))
+            replayed = ee.replay(snapshot)
+        self.assertEqual(replayed["actions"], legacy["actions"])
+        self.assertEqual(replayed["verdict"]["outcome"], "INCOMPLETE")
+        self.assertIn("scorecard", ee.to_markdown(replayed))
 
 
 if __name__ == "__main__":

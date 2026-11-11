@@ -36,6 +36,9 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from target_identity import resolve_target
+
 # --- Risk model constants (mirror ensemble/risk-model.md) --------------------
 
 MODE_WEIGHTS: Dict[str, Dict[str, float]] = {
@@ -112,27 +115,115 @@ def _run(cmd: List[str], timeout: int = 180) -> Optional[subprocess.CompletedPro
 # Each probe returns a signal dict. When the underlying tool is unavailable the
 # probe returns an `unknown` signal so the gap is surfaced, never hidden.
 
-def probe_scorecard(target: str, is_repo: bool) -> Dict[str, Any]:
-    if not is_repo or not _have("scorecard"):
+_SCORECARD_OVERLAP = {
+    "consume": {"Vulnerabilities", "Maintained", "Signed-Releases", "Pinned-Dependencies"},
+    "produce": {"Vulnerabilities", "Code-Review", "Branch-Protection", "Signed-Releases"},
+}
+_SCORECARD_CHECKS = {
+    "Binary-Artifacts", "Branch-Protection", "CI-Tests", "CII-Best-Practices",
+    "Code-Review", "Contributors", "Dangerous-Workflow", "Dependency-Update-Tool",
+    "Fuzzing", "License", "Maintained", "Packaging", "Pinned-Dependencies",
+    "SAST", "Security-Policy", "Signed-Releases", "Token-Permissions",
+    "Vulnerabilities",
+}
+
+
+def probe_scorecard(target: str, is_repo: bool, identity: Optional[Dict[str, Any]] = None,
+                    mode: str = "consume", evaluated_at: Optional[str] = None) -> Dict[str, Any]:
+    repo = (identity or {}).get("repo") if identity else None
+    if not repo and is_repo:
+        repo = resolve_target(target).get("repo")
+    if identity and identity["kind"] == "local_directory" and identity.get("git_dirty") is not False:
         return signal("scorecard", "unknown", None, "low",
-                      "Scorecard not run (needs `scorecard` CLI + repo URL).")
-    repo = target.replace("https://", "").rstrip("/")
-    proc = _run(["scorecard", f"--repo={repo}", "--format=json"])
+                      "Local working tree is dirty or its status is unavailable; remote Scorecard "
+                      "cannot represent its contents.")
+    if not repo or not _have("scorecard"):
+        return signal("scorecard", "unknown", None, "low",
+                      "Scorecard not run (needs `scorecard` CLI and a supported GitHub origin).")
+    ref = (identity or {}).get("git_commit") or (identity or {}).get("ref")
+    cmd = ["scorecard", f"--repo={repo}", "--format=json"]
+    if ref:
+        cmd.append(f"--commit={ref}")
+    proc = _run(cmd)
     if not proc or proc.returncode != 0 or not proc.stdout.strip():
-        return signal("scorecard", "unknown", None, "low",
+        return signal("scorecard", "error", None, "low",
                       "Scorecard execution failed.")
     try:
         data = json.loads(proc.stdout)
-        if not isinstance(data, dict) or "score" not in data:
-            raise ValueError("Missing aggregate")
-        agg = float(data["score"])
-        if not math.isfinite(agg) or not 0 <= agg <= 10:
+        if not isinstance(data, dict) or type(data.get("score")) not in (int, float):
             raise ValueError("Invalid aggregate")
-    except (json.JSONDecodeError, ValueError, TypeError):
+        agg = data["score"]
+        if not math.isfinite(agg) or not 0 <= agg <= 10 or \
+                not isinstance(data.get("repo"), dict) or \
+                data["repo"].get("name") != repo or \
+                not isinstance(data.get("scorecard"), dict) or \
+                not isinstance(data["scorecard"].get("version"), str) or \
+                not data["scorecard"]["version"] or \
+                not isinstance(data.get("checks"), list) or not data["checks"]:
+            raise ValueError("Invalid Scorecard metadata or checks")
+        checks = []
+        names = set()
+        for check in data["checks"]:
+            if not isinstance(check, dict) or \
+                    not isinstance(check.get("name"), str) or not check["name"] or \
+                    check["name"] in names or type(check.get("score")) not in (int, float) or \
+                    not math.isfinite(check["score"]) or \
+                    (check["score"] != -1 and not 0 <= check["score"] <= 10) or \
+                    not isinstance(check.get("reason"), str) or \
+                    check.get("details") is not None and (
+                        not isinstance(check["details"], list) or
+                        not all(isinstance(item, str) for item in check["details"])):
+                raise ValueError("Invalid Scorecard check")
+            names.add(check["name"])
+            checks.append({"name": check["name"], "score": check["score"],
+                           "reason": check["reason"], "details": check.get("details"),
+                           "overlaps": check["name"] in _SCORECARD_OVERLAP[mode]})
+        commit = data["repo"].get("commit")
+        captured = data.get("date")
+        if commit is not None and (not isinstance(commit, str) or
+                                   not re.fullmatch(r"[a-fA-F0-9]{40}", commit)):
+            raise ValueError("Invalid Scorecard commit")
+        if captured is not None:
+            _utc(captured)
+    except (json.JSONDecodeError, ValueError, TypeError, KeyError):
         return signal("scorecard", "error", None, "low",
                       "Could not parse Scorecard output.")
-    return signal("scorecard", "ok", round(agg * 10, 1), "high",
-                  f"Scorecard aggregate {agg}/10.", raw={"aggregate": agg})
+    omitted = sorted(_SCORECARD_CHECKS - names)
+    raw = {"aggregate": agg, "repo": repo, "commit": commit, "date": captured,
+           "version": data["scorecard"]["version"], "checks": checks,
+           "excluded_overlap": sorted(_SCORECARD_OVERLAP[mode]),
+           "omitted_checks": omitted,
+           "permission_scope": "Branch-Protection admin-only settings and repository "
+           "ruleset access may require additional permissions; not independently verified"}
+    if not commit or not captured:
+        return signal("scorecard", "unknown", None, "low",
+                      "Scorecard result lacks commit or capture date; revision/freshness unknown.",
+                      raw=raw, source="Scorecard")
+    expected = (identity or {}).get("git_commit") or (identity or {}).get("commit")
+    if expected and commit.lower() != expected.lower():
+        return signal("scorecard", "unknown", None, "low",
+                      "Scorecard returned a different commit than the requested target revision.",
+                      raw=raw, source="Scorecard", captured_at=captured)
+    if evaluated_at and (_utc(evaluated_at) - _utc(captured)).total_seconds() > 90 * 86400:
+        return signal("scorecard", "unknown", None, "low",
+                      "Scorecard observation is over 90 days old; refresh before scoring.",
+                      raw=raw, source="Scorecard", captured_at=captured)
+    if evaluated_at and _utc(captured) > _utc(evaluated_at):
+        return signal("scorecard", "unknown", None, "low",
+                      "Scorecard capture date is after evaluation time.",
+                      raw=raw, source="Scorecard", captured_at=captured)
+    available = [c["score"] for c in checks if not c["overlaps"] and c["score"] != -1]
+    missing = [c["name"] for c in checks if c["score"] == -1]
+    if not available or missing or omitted:
+        return signal("scorecard", "unknown", None, "low",
+                      "Scorecard has unavailable checks (score -1) or omitted checks: "
+                      + ", ".join(missing + omitted or ["no non-overlapping checks scored"]) + ".",
+                      raw=raw, source="Scorecard", captured_at=captured)
+    return signal("scorecard", "ok", round(10 * sum(available) / len(available), 1),
+                  "medium", f"Scorecard aggregate {agg}/10; scored {len(available)} "
+                  "non-overlapping checks, with per-check reasons preserved.",
+                  raw=raw, source="Scorecard", captured_at=captured,
+                  tool={"name": "scorecard", "version": data["scorecard"]["version"]})
 
 
 def _cvss_vector_score(vector: str, kind: str) -> tuple:
@@ -327,15 +418,27 @@ def _osv_findings(data: Dict[str, Any]) -> List[Dict[str, Any]]:
                   key=lambda r: (r["ecosystem"], r["package"], r["version"], r["id"]))
 
 
-def probe_known_vulns(target: str, is_local: bool) -> Dict[str, Any]:
+def probe_known_vulns(target: str, is_local: bool,
+                      identity: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     if not is_local:
         return signal("known_vulns", "unknown", None, "low",
-                      "OSV source scan needs a local checkout; package/repo resolution is not supported.")
+                      "OSV source scan needs a local directory or lockfile/SPDX file. "
+                      "Repository URLs, package coordinates and OCI digests are not acquired or scanned.")
+    if identity and identity["kind"] == "local_file" and identity["file_type"] == "file":
+        return signal("known_vulns", "unknown", None, "low",
+                      "OSV supports recognized lockfiles and SPDX files; this file format is unsupported.")
     if not _have("osv-scanner"):
         return signal("known_vulns", "unknown", None, "low",
                       "OSV-Scanner not installed.")
-    proc = _run(["osv-scanner", "scan", "source", "--format=json",
-                 "--no-call-analysis=go", "--recursive", target])
+    cmd = ["osv-scanner", "scan", "source", "--format=json", "--no-call-analysis=go"]
+    if identity and identity["kind"] == "local_file":
+        if identity["file_type"] == "spdx":
+            cmd.extend(["-L", identity["path"]])
+        else:
+            cmd.append(f"--lockfile=:{identity['path']}")
+    else:
+        cmd.extend(["--recursive", target])
+    proc = _run(cmd)
     if proc is None or proc.returncode not in (0, 1) or not proc.stdout.strip():
         return signal("known_vulns", "error", None, "low",
                       "OSV-Scanner failed or produced no JSON; no clean result inferred.")
@@ -637,12 +740,6 @@ def _confidence(signals: List[Dict[str, Any]], complete: bool) -> str:
 
 # --- Orchestration -----------------------------------------------------------
 
-def classify_target(target: str) -> Dict[str, bool]:
-    is_repo = target.startswith("http") or target.count("/") == 1 and "@" not in target
-    is_local = Path(target).exists()
-    return {"is_repo": bool(is_repo and not is_local), "is_local": is_local}
-
-
 def _utc(value: str) -> datetime:
     try:
         date = datetime.fromisoformat(value.replace("Z", "+00:00"))
@@ -757,8 +854,13 @@ def _actions(signals: List[Dict[str, Any]], target: str,
                 else:
                     actions.append(f"Investigate {f['id']} in {f['package']}@{f['version']}; "
                                    "confirm severity and available fixes.")
+    scorecard = next((s for s in signals if s["name"] == "scorecard"), None)
+    if scorecard and scorecard["status"] == "ok" and isinstance(scorecard.get("raw"), dict):
+        for check in scorecard["raw"].get("checks", []):
+            if check["score"] == 0 and not check["overlaps"]:
+                actions.append(f"Investigate Scorecard {check['name']}: {check['reason']}")
     if not actions:
-        if target_kind == "local":
+        if target_kind in ("local", "local_directory"):
             inventory = Path(__file__).resolve().with_name("assess-project.py")
             actions.append("Inventory local dependencies and existing security artifacts "
                            f"with `python3 {shlex.quote(str(inventory))} "
@@ -793,25 +895,36 @@ def _report(target: str, mode: str, signals: List[Dict[str, Any]],
 
 
 def evaluate(target: str, mode: str, evidence: Optional[Path] = None,
-             evaluated_at: Optional[str] = None) -> Dict[str, Any]:
+             evaluated_at: Optional[str] = None,
+             ecosystem: Optional[str] = None) -> Dict[str, Any]:
     evaluated_at = evaluated_at or datetime.now(timezone.utc).isoformat()
     _utc(evaluated_at)
-    kind = classify_target(target)
-    is_repo, is_local = kind["is_repo"], kind["is_local"]
+    identity = resolve_target(target, ecosystem)
+    is_repo = identity["kind"] == "repo"
+    is_local = identity["kind"] in ("local_directory", "local_file")
+    is_dir = identity["kind"] == "local_directory"
+    scan_path = identity.get("path", target)
 
     signals = [
-        probe_scorecard(target, is_repo),
-        probe_known_vulns(target, is_local),
+        probe_scorecard(target, is_repo, identity, mode, evaluated_at),
+        probe_known_vulns(scan_path, is_local, identity),
         probe_provenance(target),
         probe_baseline(target),
     ]
     if mode == "consume":
-        signals[2:2] = [probe_maintenance(target, is_local),
-                        probe_supply_chain(target)]
+        if is_dir or is_repo:
+            maintenance_target = identity["path"] if is_dir else \
+                identity["repo"].removeprefix("github.com/")
+            maintenance = probe_maintenance(maintenance_target, is_dir)
+        else:
+            maintenance = signal("maintenance", "unknown", None, "low",
+                                 "Repository maintenance needs a local checkout or GitHub repo; "
+                                 "package and image coordinates have no verified source repository.")
+        signals[2:2] = [maintenance, probe_supply_chain(target)]
     if mode == "produce":
         signals += [
-            probe_secrets(target, is_local),
-            probe_code_review(target, is_local),
+            probe_secrets(scan_path, is_dir),
+            probe_code_review(scan_path, is_dir),
             probe_threat_coverage(target),
         ]
 
@@ -845,7 +958,7 @@ def evaluate(target: str, mode: str, evidence: Optional[Path] = None,
         if s["status"] == "ok" and not s["captured_at"]:
             s["captured_at"] = evaluated_at
         if s["status"] == "ok" and not s["tool"]:
-            tool_name = {"maintenance": "git" if is_local else "gh",
+            tool_name = {"maintenance": "git" if is_dir else "gh",
                          "scorecard": "scorecard", "code_review": "local files"}.get(s["name"])
             if tool_name:
                 s["tool"] = {"name": tool_name, "version":
@@ -853,9 +966,7 @@ def evaluate(target: str, mode: str, evidence: Optional[Path] = None,
                              else "not applicable"}
         elif s["status"] == "ok" and s["tool"]["version"] == "unrecorded":
             s["tool"]["version"] = _tool_version(s["tool"]["name"])
-    target_kind = "local" if is_local else ("repo" if is_repo else "package")
-    return _report(target, mode, signals, evaluated_at, target_kind,
-                   {"requested": target, "resolved": False})
+    return _report(target, mode, signals, evaluated_at, identity["kind"], identity)
 
 
 def replay(snapshot: Path, evaluated_at: Optional[str] = None) -> Dict[str, Any]:
@@ -869,7 +980,8 @@ def replay(snapshot: Path, evaluated_at: Optional[str] = None) -> Dict[str, Any]
     _utc(at)
     if not all(isinstance(s, dict) for s in data["signals"]):
         raise ValueError("Invalid snapshot signal")
-    if data.get("target_kind") not in ("local", "repo", "package") or \
+    if data.get("target_kind") not in (
+            "local", "local_directory", "local_file", "repo", "package", "image") or \
             not isinstance(data.get("target_identity"), dict):
         raise ValueError("Snapshot target identity missing")
     report = _report(data["target"], data["mode"], data["signals"], at,
@@ -890,6 +1002,15 @@ def _md(value: Any) -> str:
 def _risks(signals: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     risks = []
     for s in signals:
+        if s["name"] == "scorecard" and s["status"] == "ok" and \
+                isinstance(s.get("raw"), dict):
+            for check in s["raw"].get("checks", []):
+                if check["score"] == 0 and not check["overlaps"]:
+                    risks.append({"finding": f"Scorecard {check['name']}: {check['reason']}",
+                                  "priority": 24 if check["name"] == "Dangerous-Workflow" else 3,
+                                  "source": "Scorecard",
+                                  "basis": "Failed check at the recorded revision; "
+                                           "verify context before remediation"})
         if s["name"] == "known_vulns" and isinstance(s.get("raw"), dict):
             for f in s["raw"].get("findings", []):
                 severity = f["severity"]
@@ -922,6 +1043,9 @@ def to_markdown(report: Dict[str, Any]) -> str:
         f"- **Identity:** requested `{_md(report['target'])}`; "
         + ("resolved" if report["target_identity"]["resolved"] else
            "not pinned to an immutable artifact"),
+        f"- **Resolved scope:** `{_md(report['target_identity'].get('identifier', 'not recorded'))}`; "
+        f"immutable: {_md(report['target_identity'].get('immutable', 'unknown'))}; "
+        f"verified locally: {_md(report['target_identity'].get('verified', 'unknown'))}",
         f"- **Evaluated:** {_md(report['evaluated_at'])} · "
         f"**Policy:** custom heuristic v{_md(report['policy_version'])} · "
         f"**Schema:** v{report['schema_version']}",
@@ -973,6 +1097,21 @@ def to_markdown(report: Dict[str, Any]) -> str:
              for s in report["signals"] if s.get("evidence_note")]
     if notes:
         lines += ["", "**Evidence reconciliation:**", *notes, ""]
+    scorecard = next((s for s in report["signals"] if s["name"] == "scorecard"), None)
+    if scorecard and isinstance(scorecard.get("raw"), dict) and \
+            isinstance(scorecard["raw"].get("checks"), list):
+        raw = scorecard["raw"]
+        lines += ["", "**Scorecard checks:** aggregate "
+                  f"{_md(raw['aggregate'])}/10; revision {_md(raw.get('commit') or 'unrecorded')}; "
+                  f"captured {_md(raw.get('date') or 'unrecorded')}; "
+                  f"version {_md(raw.get('version') or 'unrecorded')}. "
+                  "Overlapping checks are preserved but not scored again. "
+                  f"{_md(raw.get('permission_scope', ''))}", ""]
+        for check in raw["checks"]:
+            lines.append(f"- **{_md(check['name'])} ({_md(check['score'])}/10"
+                         f"{', overlap' if check['overlaps'] else ''}):** "
+                         f"{_md(check['reason'])}"
+                         + (f"; {_md('; '.join(check['details']))}" if check["details"] else ""))
     risks = _risks(report["signals"])
     lines.extend(f"{i}. **{_md(r['finding'])}** — {_md(r['source'])}; "
                  f"priority {_md(r['priority'] if r['priority'] is not None else 'unranked')}. "
@@ -1005,23 +1144,27 @@ def main():
     ap = argparse.ArgumentParser(description="OpenSSF ensemble evaluator")
     selection = ap.add_mutually_exclusive_group(required=True)
     selection.add_argument("--target",
-                    help="local path, repo URL (owner/repo), or package@version")
+                    help="local ./path, GitHub owner/repo[@ref], exact package@version, or OCI digest")
     selection.add_argument("--replay", type=Path, help="re-evaluate a JSON snapshot without scanners")
     ap.add_argument("--mode", choices=["consume", "produce"])
+    ap.add_argument("--ecosystem", choices=sorted({"npm", "PyPI", "Go", "crates.io",
+                                                    "Maven", "NuGet", "RubyGems"}),
+                    help="required for package@version targets without a purl")
     ap.add_argument("--format", choices=["json", "md"], default="json")
     ap.add_argument("--evidence", type=Path, help="import versioned, target-bound manual observations")
     ap.add_argument("--snapshot-out", type=Path, help="write sanitized replayable JSON")
     ap.add_argument("--at", help="ISO-8601 evaluation time (UTC offset required)")
     args = ap.parse_args()
-    if bool(args.target) != bool(args.mode) or args.replay and args.evidence:
-        ap.error("--target requires --mode; --evidence cannot be used with --replay")
+    if bool(args.target) != bool(args.mode) or args.replay and (args.evidence or args.ecosystem):
+        ap.error("--target requires --mode; --evidence/--ecosystem cannot be used with --replay")
     try:
         report = (replay(args.replay, args.at) if args.replay else
-                  evaluate(args.target, args.mode, args.evidence, args.at))
+                  evaluate(args.target, args.mode, args.evidence, args.at, args.ecosystem))
         if args.snapshot_out:
             args.snapshot_out.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     except (OSError, ValueError, KeyError, TypeError) as exc:
-        ap.error(f"Evidence validation or output failed ({type(exc).__name__}); "
+        ap.error(str(exc) if isinstance(exc, ValueError) else
+                 f"Evidence validation or output failed ({type(exc).__name__}); "
                  "check schema, target, mode, and writable paths")
     if args.format == "md":
         print(to_markdown(report))
