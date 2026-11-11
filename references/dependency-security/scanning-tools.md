@@ -523,6 +523,45 @@ For each vulnerability:
 - Is it exploitable in our context?
 - What data/systems are at risk?
 
+For an already available OSV-Scanner v2.7.1 JSON result, the optional offline
+`scripts/vulnerability_evidence.py` API can retain evidence before per-package
+advisories are flattened into alias groups. Call
+`triage_osv_package(package, advisories, product=None, vex_documents=(),
+trusted_authors=(), authenticated_authors=(), as_of=None, max_age_days=None,
+reachability=None)` with one `results[].packages[].package` (`ecosystem`,
+`name`, `version`, optional **versioned** `purl`) and that entry's raw
+`vulnerabilities` array. The return value has `package`, `product`, and
+`findings`; each finding has scoped `records` (source, aliases, withdrawn,
+affected versions/ranges, package-specific fixes, version status, malicious
+assertion), an aggregate `version_status`, `vex` contexts, and `reachability`.
+Only exact listed versions and safe exact range event boundaries are classified;
+other range comparisons, unsupported ecosystems, and uncertain coverage remain
+unresolved. OSV `MAL-` reports are **not** by themselves proof of compromise:
+the corpus also includes inconclusive typosquat, spam, obfuscation, and
+withdrawn reports. A caller-normalized
+`database_specific.malicious_activity: {"confirmed": true, "source": "analyst_review"}`
+adds a *sourced assertion*, not independently verified compromise. No missing
+CVSS becomes a default severity.
+
+VEX input is a list of standalone [OpenVEX 0.2.0](https://github.com/openvex/spec/releases/tag/v0.2.0)
+documents (not CSAF, CycloneDX, or encapsulated attestations). An explicit
+`product` purl identifies the exact product; a matching package purl identifies
+the component, and for a distinct product the statement must name that
+component in `subcomponents`. Exact purl text, including version/qualifiers,
+must match; only npm, PyPI, Go, crates.io and Maven purls have identity
+cross-checking here. `trusted_authors` is an allowlist policy, **not** an
+authentication mechanism. Supply `authenticated_authors` only from independent
+caller-side verification of the document and its issuer, never from a document
+field or user-provided claim. Without both, exact scope and a caller-selected
+`max_age_days` freshness policy, even `not_affected` with a machine-readable
+justification remains context only. A candidate still requires review: this
+API does not suppress vulnerabilities or change scoring. Reachability defaults
+to unknown; optional `{status, method}` uses `reachable`/`not_reachable`/
+`unknown` and `manual_review`/`static_call_analysis`/`dynamic_observation`/
+`not_assessed`. A negative analysis is not proof of unexploitable code.
+No scanner, package install, build scripts, network, or optional Python
+dependencies are required to triage already-available evidence.
+
 ### 3. Remediate
 
 Options in order of preference:
