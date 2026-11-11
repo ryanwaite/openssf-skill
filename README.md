@@ -34,8 +34,9 @@ involve Scorecard, OSV-Scanner, secrets scanning and signing verification.
          SBOM ─────┤      applicable evidence → mode-specific weights   ┌─ Adopt / Avoid   (consume)
    signing/SLSA ───┼──►   → escalation → qualify incomplete results ──► │
        secrets ────┤            ensemble/risk-model.md                  └─ A–F grade       (produce)
-   maintenance ────┤
-  OSPS Baseline ───┘
+   maintenance ────┘
+
+  OSPS Baseline ─────► separate, unweighted conformance evidence
 ```
 
 Audit modes have different applicable probes and weights. Missing evidence is
@@ -168,9 +169,13 @@ observations, add `--evidence observations.json`; the
 binds observations to the requested target and mode and distinguishes manual
 review from self-report. Importing evidence does not independently verify it.
 
-Only run this broader evaluation when requested. A `package@version` string
-alone is not currently resolved to an immutable package/lockfile by the runner;
-do not use it to claim a package was scanned. Check the report for unknown,
+Only run this broader evaluation when requested. Explicit local directories,
+lockfiles/SPDX files, GitHub repositories with optional `@ref`, versioned purls,
+`package@version --ecosystem <ecosystem>`, and OCI `@sha256:` references have
+distinct target identities. A package coordinate or supplied image digest is
+**not** proof that its bytes were fetched or scanned: remote acquisition and
+package/image scanning remain unsupported by the source-scan adapter.
+Check the report for unknown,
 failed, or unsupported probes and corroborate externally before relying on a
 verdict. The suite does **not** need to run to produce one useful advisor action.
 
@@ -179,11 +184,22 @@ verdict. The suite does **not** need to run to produce one useful advisor action
 | Capability | Current scope | Prerequisite for one advisor action? |
 |------------|---------------|--------------------------------------|
 | Local inventory and SECURITY.md/threat-model guidance | Implemented; stdlib inventory plus bundled templates | Python 3 for the detector; none for manual guidance |
-| Scorecard, OSV and Gitleaks via audit runner | CLI adapters for suitable targets when installed; verify invocation and result coverage | No |
+| Scorecard, OSV and Gitleaks via audit runner | Structured Scorecard checks/revision gaps; local source or supported file OSV scans; redacted secrets scanning | No |
 | Local repository metadata / CODEOWNERS | Partial indicators, not verified review enforcement | No |
-| SBOM, signing/provenance, Baseline conformance, threat coverage | References and manual work; check current runner output for `unknown` rather than claiming an integrated verified probe | No |
+| Local signature/provenance and SPDX evidence | Opt-in `--artifact-evidence`; established optional verifiers, explicit identities/digests, SPDX JSON 2.3 quality/scope; no automatic SLSA level or completeness claim | No |
+| Baseline conformance | Optional `--baseline-evidence`; canonical versioned L1-L3 IDs and manual applicability, separate from numeric risk | No |
+| Malicious-package/reachability/VEX context | Package-scoped advisory facts and optional `--vex-evidence`; no blind suppression or inferred issuer authentication | No |
+| Threat coverage and effective forge controls | Manual evidence; local indicators do not prove enforcement | No |
 | Manual evidence and offline replay | Versioned, target-bound observations and snapshots; imported claims are not independently verified | No |
-| Package coordinate resolution, centralized/default forge controls | Not verified by local detector; unsupported without independent evidence | No |
+| Remote repositories, packages, OCI images | Explicit reference/coordinate identity only; no automatic cloning, installation, image pulling, or artifact verification | No |
+
+Custom risk **policy v2** removes Baseline from numeric scoring and renormalizes
+the other weights without changing their relative importance. Previous
+policy-v1 snapshots must use the matching implementation for replay; they are
+not silently rescored. The [runtime evidence guide](skills/audit/SKILL.md#optional-target-bound-runtime-evidence)
+documents the independent input formats and trust boundaries. Public artifact
+verifier trust lookup requires `--allow-network-trust`; this is not needed for
+local inventory, Baseline evidence, or inspecting an existing SPDX document.
 
 Audit evidence can require optional scanners, a resolvable repository/lockfile,
 forge permissions, and network access. The detector reads local files only;

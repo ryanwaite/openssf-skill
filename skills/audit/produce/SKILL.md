@@ -26,7 +26,8 @@ you can recommend and directly apply fixes, generate artifacts from
 5. **Known vulnerabilities** — OSV/audit on your dependency tree.
 6. **Threat coverage** — is there a current STRIDE threat model covering trust
    boundaries? Create/update with `templates/threat-model.md.template`.
-7. **Baseline** — OSPS Baseline L1 conformance; close gaps.
+7. **Baseline** — separate, unweighted OSPS conformance for the selected catalog
+   and maturity level; close observed gaps without waiting for all tooling.
 
 ## Fuse and grade
 Apply `ensemble/risk-model.md` with **PRODUCE weights** (secrets, provenance,

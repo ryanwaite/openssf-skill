@@ -5,6 +5,12 @@ output of many independent OpenSSF tools is normalized, weighted, and combined
 into a reproducible decision aid. This is a **custom heuristic**, not an
 OpenSSF certification, OSPS Baseline grade, or proof of artifact safety.
 
+**Policy version 2:** OSPS Baseline conformance is reported separately, without
+a numeric risk weight. The remaining version-1 weights are divided by 0.92
+(consume) or 0.90 (produce), preserving their relative importance. A version-1
+snapshot must be replayed with its original policy implementation, not silently
+rescored under version 2. New evaluations record `policy_version: "2"`.
+
 The goal: turn a pile of disconnected tool scores ("Scorecard 4.2", "3 CVEs",
 "unsigned releases") into one decision — *Adopt / Adopt-with-mitigations / Avoid*
 for consumed dependencies, or an *A–F posture grade* for projects you build.
@@ -39,17 +45,29 @@ inventory, manual review, or immediate remediation.
 
 | Signal | Source tool(s) | Normalization |
 |--------|----------------|---------------|
-| `scorecard` | OpenSSF Scorecard | `subscore = scorecard_aggregate * 10` (0–10 → 0–100) |
+| `scorecard` | OpenSSF Scorecard | Preserve the upstream aggregate as context; score 10 times the mean of available non-overlapping checks. Consume excludes Vulnerabilities, Maintained, Signed-Releases, and Pinned-Dependencies; produce excludes Vulnerabilities, Code-Review, Branch-Protection, and Signed-Releases. Omitted/unavailable checks, missing revision/time, revision mismatch, dirty working trees, and observations older than 90 days remain unscored gaps. This is a separate custom heuristic, not the upstream aggregate. |
 | `known_vulns` | OSV-Scanner for local source | Start at 100. Subtract 40 per CRITICAL, 20 per HIGH, 8 per MEDIUM, 2 per LOW, 0 per NONE (CVSS 0) **advisory group per affected package/version**. Floor at 0. A documented fixed version doubles that finding's deduction. Unknown severity prevents a scored clean result. Numeric CVSS 0–10 and explicit advisory severity buckets are supported; optional `cvss==3.6` calculates CVSS2/3/4 vectors (base score only) in an isolated interpreter. Missing extra, malformed/unsupported vectors, and contradictory uncomputable vectors remain unknown, not MEDIUM. When computed and explicit buckets conflict, retain the higher severity; an independently supported CRITICAL fact still triggers its cap even if another severity entry is unresolved. |
 | `maintenance` | Repo metadata | Full policy: 100 if released ≤3mo AND ≥2 active maintainers. −25 if last release 3–12mo; −50 if >12mo; −25 if bus factor = 1; −100 if archived/EOL (floor 0). Current runner only has a *low/medium-confidence commit/push recency proxy* (100 ≤90d, 75 ≤365d, 50 older, or 0 archived). It must not claim release cadence or maintainer count from a push. |
 | `supply_chain` | SBOM + transitive analysis | 100 minus 5 per direct dependency with its own CRITICAL/HIGH CVE, minus 2 per deep (transitive) one. Floor 0. Pinned + lockfile present adds +10 (cap 100). |
 | `provenance` | SLSA level, Sigstore/Cosign verify | SLSA L3=100, L2=70, L1=40, L0/none=10. +0 but flips `signing_verified` flag used by escalation rules. |
 | `secrets` | Gitleaks | 100 if history (when git available) and working directory both clean. Potential regex finding → 50 pending verification; a separately *verified live* secret → 0 (and triggers CRITICAL escalation). Never include secret bytes in reports. |
-| `baseline` | OSPS Baseline catalog version (manual import) | Custom `subscore = (controls_met / controls_total) * 100`; **not** an official OSPS score or certification. |
 | `threat_coverage` | STRIDE threat model (PRODUCE only) | 100 if current model exists covering trust boundaries; 50 if partial/stale; 0 if none. |
 | `code_review` | Branch protection + review signal | 100 if required reviews + protected default branch; 50 if partial; 0 if direct pushes allowed. |
 
 If a tool emits richer detail, prefer it — these are floors, not ceilings.
+
+`baseline_conformance` is **outside** this normalization table. It records
+versioned requirement IDs, applicability, observations, and unknowns, with no
+score or certification. `artifact_evidence` separately records optional
+signature/provenance verification and SPDX inventory quality. A verified
+signature does not establish a SLSA level, and an SPDX document's checksum
+declaration does not prove inventory completeness.
+
+OSV records retain package-scoped affected ranges and fixes, withdrawal status,
+malicious-package assertions, and reachability/VEX context. Withdrawn records
+are retained as context, not scored. A malicious advisory identifier is not
+proof of compromise. Imported VEX author allowlists do not authenticate the
+document; no imported not-affected statement automatically suppresses findings.
 
 ---
 
@@ -65,25 +83,23 @@ Emphasis: what can hurt *us* by pulling it in.
 
 | Signal | Weight |
 |--------|--------|
-| `known_vulns` | 0.28 |
-| `maintenance` | 0.22 |
-| `supply_chain` | 0.16 |
-| `scorecard` | 0.14 |
-| `provenance` | 0.12 |
-| `baseline` | 0.08 |
+| `known_vulns` | 0.28 / 0.92 |
+| `maintenance` | 0.22 / 0.92 |
+| `supply_chain` | 0.16 / 0.92 |
+| `scorecard` | 0.14 / 0.92 |
+| `provenance` | 0.12 / 0.92 |
 
 ### PRODUCE — "Is what we ship trustworthy and hardened?"
 Emphasis: controls we own and are accountable for.
 
 | Signal | Weight |
 |--------|--------|
-| `secrets` | 0.20 |
-| `provenance` | 0.16 |
-| `code_review` | 0.16 |
-| `scorecard` | 0.14 |
-| `known_vulns` | 0.12 |
-| `threat_coverage` | 0.12 |
-| `baseline` | 0.10 |
+| `secrets` | 0.20 / 0.90 |
+| `provenance` | 0.16 / 0.90 |
+| `code_review` | 0.16 / 0.90 |
+| `scorecard` | 0.14 / 0.90 |
+| `known_vulns` | 0.12 / 0.90 |
+| `threat_coverage` | 0.12 / 0.90 |
 
 ---
 
@@ -166,19 +182,19 @@ silently assigned CRITICAL severity.
 
 ## 8. Worked example (CONSUME)
 
-A library: Scorecard 6.5; one HIGH CVE (fix available); last release 2mo ago,
-2 maintainers; clean secrets; SLSA L1, unsigned; OSPS 6/10.
+A library: custom non-overlapping Scorecard subscore 65; one HIGH CVE
+(fix available); maintenance subscore 100; SLSA L1. Baseline observations
+are reported separately and do not enter this arithmetic.
 
 ```
-scorecard    = 65    × 0.14 = 9.10
-known_vulns  = 60    × 0.28 = 16.80   (100 − 20 doubled for fix-available = 60)
-maintenance  = 100   × 0.22 = 22.00
+scorecard    = 65    × (0.14 / 0.92)
+known_vulns  = 60    × (0.28 / 0.92)  (100 − 20 doubled for fix-available = 60)
+maintenance  = 100   × (0.22 / 0.92)
 supply_chain = (n/a, unknown → dropped, weights renormalized)
-provenance   = 40    × 0.12 = ...
-baseline     = 60    × 0.08 = ...
+provenance   = 40    × (0.12 / 0.92)
 ```
 After renormalizing for the dropped `supply_chain` weight,
-`base = (9.10 + 16.80 + 22.00 + 4.80 + 4.80) / 0.84 = 68.45238… → 68.5`.
+`base = (9.10 + 16.80 + 22.00 + 4.80) / 0.76 = 69.34210… → 69.3`.
 No escalation triggers fire (HIGH CVE caps at High Risk only on CRITICAL).
 → **INCOMPLETE** with *provisional* Adopt with mitigations: upgrade past the
 HIGH CVE now; investigate supply-chain exposure if assurance is needed.

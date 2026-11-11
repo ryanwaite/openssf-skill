@@ -23,6 +23,30 @@ scorecard --repo=github.com/owner/repo --show-details
 scorecard --repo=github.com/owner/repo --format=json > scorecard.json
 ```
 
+For the ensemble runner, use `--target ./project` for a local directory,
+`--target ./package-lock.json` or `--target ./bom.spdx.json` for a file, or
+`--target owner/repo@<40-character-commit>` for a GitHub revision. Other forges
+are not supported by this adapter. A clean local git checkout with a supported
+GitHub origin may be scored remotely at its local commit; a dirty checkout or a
+different returned commit is **not** scored as the same source. The remote
+Scorecard check does not inspect local uncommitted changes. A branch name or
+default HEAD is mutable, so preserve the returned commit and capture date.
+
+The runner retains each Scorecard 5.6 check's canonical name, score, reason,
+and details alongside aggregate, version, date, and repository commit.
+Unavailable (`-1`) or omitted checks are evidence gaps, even when the
+aggregate is high; stale or revision-mismatched results are not scored. The
+ensemble Scorecard subscore is the average of available checks excluding
+checks already represented by other weighted signals (for example
+Vulnerabilities and Maintained), **not** the published aggregate multiplied
+by ten. Policy weights remain unchanged. Branch-Protection may not include
+admin-only controls without an admin token; repository ruleset visibility
+depends on permissions. Treat these permission gaps as unverified, not as
+proof that protections exist or are absent. Scorecard's probe-level
+`OutcomeNotAvailable` and `OutcomeNotApplicable` likewise must not be
+interpreted as positive outcomes; the runner currently ingests JSON checks,
+not the experimental probe output.
+
 ---
 
 ## Check Categories

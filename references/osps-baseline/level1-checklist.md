@@ -48,3 +48,68 @@ Start with one missing, high-impact control: publish a security contact (**OSPS-
 **OSPS-AC-04.01** (default CI task permissions), **OSPS-BR-06.01** (signed releases), and **OSPS-QA-06.01** (automated tests before accepting commits) are **Level 2**. **OSPS-QA-07.01** (non-author human approval before merging into the primary branch) is **Level 3**. Review is useful even before Level 3, but do not claim it is an L1 requirement. **OSPS-BR-01.02** was removed in the 2026.02.19 release; do not resurrect it.
 
 See the [2026.08.28 release notes](https://github.com/ossf/security-baseline/blob/main/docs/release_notes.md) for version changes. The [Baseline FAQ](https://github.com/ossf/security-baseline/blob/main/docs/faq.md) explicitly excludes scoring/grading projects, comparing projects, and treating the Baseline as regulatory certification. Evidence may require manual verification; absence of a particular automation is not proof a control is unmet.
+
+## Optional structured conformance evidence
+
+Record one useful observation first; you do not need to complete the checklist
+or install scanners to use this path. The stdlib-only
+`scripts/baseline_conformance.py` validates supplied observations against the
+released catalog's requirement IDs and **explicit** maturity applicability.
+It reports `met`, `not_met`, `unknown`, and justified `not_applicable` counts,
+not a risk score. Missing observations remain unknown. Evidence references are
+not fetched, and a complete set of supplied observations is not independent
+verification or certification.
+
+The mapping is pinned to the
+[v2026.08.28 source commit](https://github.com/ossf/security-baseline/tree/a26a7963f6fd098c1e82829322ec9e1196a4f294/baseline),
+using the Gemara `assessment-requirements`, `applicability`, and retired-state
+fields rather than a generated checklist's grouping. Applicability is not
+blindly cumulative: this release lists BR-07.01 and VM-02.01 for maturity-1
+only. Retired BR-01.02 is excluded. Read the source requirement and its
+recommendation when assessing a condition-specific exception; the validator
+does not decide applicability for you.
+
+Save a target-bound observation document such as:
+
+```json
+{
+  "schema_version": 1,
+  "catalog_version": "2026.08.28",
+  "target": "example/project",
+  "revision": "release-1",
+  "scope": "Primary repository at release-1; no subprojects",
+  "level": 1,
+  "observations": [
+    {
+      "requirement_id": "OSPS-VM-02.01",
+      "status": "met",
+      "evidence_type": "manual_observation",
+      "source": "Human review of release-1",
+      "captured_at": "2026-11-10T00:00:00Z",
+      "reason": "Security contacts are documented",
+      "evidence": ["SECURITY.md at release-1"]
+    }
+  ]
+}
+```
+
+Replace the example target, revision, scope, timestamp, and references with
+actual reviewed evidence. Do not include credentials or private personal data.
+Use `self_report` instead of `manual_observation` for an uncorroborated claim:
+its asserted status is retained, but its assessed status remains unknown.
+Met/not-met observations require references; not-applicable observations require
+a reason. Duplicate, retired, wrong-level, future-dated, and unknown requirement
+records are rejected explicitly.
+
+```bash
+python3 <installed-skill>/scripts/baseline_conformance.py \
+  --target example/project --revision release-1 --evidence baseline.json
+```
+
+`--revision` checks the claimed revision against an expected identity when you
+know it. `--at` accepts a timezone-qualified evaluation timestamp for reproducible
+age calculations. No freshness threshold is silently selected. This separate
+conformance report is also available through the ensemble's
+`--baseline-evidence baseline.json` option. Under custom risk policy v2,
+Baseline has no numeric weight: its conformance evidence is separate from
+the ensemble risk score.

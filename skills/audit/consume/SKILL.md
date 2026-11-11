@@ -32,7 +32,8 @@ cannot change the upstream repo — you can only observe signals and recommend
 4. **Provenance & signing** — are releases signed (Cosign/Sigstore)? SLSA level?
    Can you verify the artifact you'd actually pull?
 5. **Project health** — OpenSSF Scorecard on the source repo.
-6. **Baseline** — OSPS Baseline L1 as a maturity yardstick (informational).
+6. **Baseline** — separate, unweighted versioned OSPS conformance observations,
+   not a project-comparison score. Start with applicable L1 controls.
 
 ## Fuse and decide
 Apply `ensemble/risk-model.md` with **CONSUME weights** (vulns + maintenance

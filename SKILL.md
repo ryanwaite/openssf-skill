@@ -5,9 +5,10 @@ description: |
   specific security control (threat model, SECURITY.md, SBOM setup, Sigstore
   signing, Dockerfile hardening, secrets pre-commit hook, Scorecard workflow).
   **Audit** runs the OpenSSF tools as an ENSEMBLE (Scorecard, OSV/dependency
-  scanning, SBOM, Sigstore/SLSA signing, secrets scanning, OSPS Baseline) and
+  scanning, SBOM, Sigstore/SLSA verification, secrets scanning) and
   fuses their signals into one decision-ready verdict — Adopt/Avoid for a
-  dependency you consume, or an A–F grade for a project you produce. Invoke for
+  dependency you consume, or an A–F grade for a project you produce, with
+  OSPS Baseline conformance reported separately without a risk weight. Invoke for
   anything from "generate a SECURITY.md" to "is this library safe to adopt?" to
   "grade our security posture." Routes the request to the right mode: advisor or
   audit (which further picks consume vs produce).
@@ -63,6 +64,9 @@ critical findings.
 - `scripts/assess-project.py` — stdlib-only local artifact inventory/readiness; its legacy `security_score` is not an audit verdict or evidence of enforced controls.
 - `scripts/ensemble-eval.py` — runs the audit ensemble and emits a fused
   JSON/Markdown verdict (degrades gracefully when a tool isn't installed).
+- `scripts/baseline_conformance.py` — optional stdlib-only validation of versioned
+  requirement-level observations; no score or certification. Also available in
+  an audit through `--baseline-evidence`.
 
 Every audit conclusion cites its evidence. Qualify positive verdicts with
 incomplete evidence as provisional; this is never a gate on advisor work.

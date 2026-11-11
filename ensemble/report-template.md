@@ -36,8 +36,11 @@ not an adoption recommendation/grade. A supported negative cap still applies.>
 
 | Signal | Status | Sub-score | Original → effective weight | Contribution | Confidence | Source / time | Finding |
 |--------|--------|-----------|-----------------------------|--------------|------------|---------------|---------|
-| Known vulnerabilities | ok | 60 | 0.28 → 0.333 | 20.00 | high | OSV-Scanner / date | one HIGH (fix available) |
-| Supply chain | unknown | — | 0.16 → 0 | — | low | unmeasured | SBOM not reviewed |
+| Known vulnerabilities | ok | 60 | 0.30435 → 0.36842 | 22.11 | high | OSV-Scanner / date | one HIGH (fix available) |
+| Supply chain | unknown | — | 0.17391 → 0 | — | low | unmeasured | SBOM not reviewed |
+
+These illustrative weights use consume policy v2 with only supply-chain
+evidence missing. Baseline conformance is not part of this table.
 
 **Math:** Σ (sub-score × effective weight) = <base>; cap → <final>.
 **Escalations applied:** <none | rule + effect>.
@@ -57,6 +60,21 @@ scanner available, begin with local inventory, targeted guidance, and manual
 review. Scanners and complete evidence are optional *assurance steps*, not
 mandatory setup before progress. Do not prescribe actions for unsupported
 target types as though a successful scan occurred.
+
+## Optional contextual evidence
+
+When supplied, separately describe local signature/provenance verification,
+SPDX inventory scope/quality, and exact-component malicious-package/VEX context.
+Verification success does not imply a SLSA level or a complete dependency
+inventory. Declared VEX author identity is not authentication; do not silently
+suppress findings.
+
+## OSPS Baseline conformance (not weighted)
+
+If supplied, report catalog version, maturity level, target/revision/scope,
+met/not-met/unknown/justified-not-applicable counts, and observation sources.
+This is not a numeric grade or independent certification. Missing observations
+do not block targeted remediation.
 
 ## What we could not determine
 - <signal> — <unknown / execution error / nonapplicable if established>
@@ -81,3 +99,5 @@ signals conflicted, default to caution. No raw secret bytes or scanner stderr.
 - Replay with `--replay snapshot.json --at <ISO-8601>`; no probes run. Identity,
   observations, timestamp, policy version, and effective weights must remain
   visible in JSON and Markdown.
+- Policy-v1 snapshots must use their original policy implementation; do not
+  silently apply policy-v2 weights to a historical report.
