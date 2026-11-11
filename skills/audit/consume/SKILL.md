@@ -39,8 +39,13 @@ Apply `ensemble/risk-model.md` with **CONSUME weights** (vulns + maintenance
 dominate). Apply escalation rules — an unpatched CRITICAL with a fix, or an
 archived critical dependency, caps the verdict regardless of other strengths.
 
-Verdict tiers: **Adopt** (≥80) · **Adopt with mitigations** (55–79) · **Avoid**
-(<55 or escalation).
+With complete weighted evidence: **Adopt** (≥80) · **Adopt with mitigations**
+(55–79) · **Avoid** (<55 or supported escalation). A favorable partial score
+is **INCOMPLETE**, with a separate provisional tier, not permission to adopt.
+An independently supported negative cap may still warrant Avoid on partial
+data. Missing optional
+tools must not delay exact-version inventory, manual advisory review, pinning,
+or mitigation.
 
 ## Report
 Use `ensemble/report-template.md`. For "Adopt with mitigations," the required
@@ -51,3 +56,6 @@ actions are **compensating controls** the consumer owns:
 - Gate CI on a re-scan; sandbox at runtime if it handles untrusted input.
 
 Always state what you could not determine and how it affects confidence.
+Treat unresolved artifact identity and source-only evidence as gaps; a
+`package@version` is not a scanner lockfile. Use the versioned manual
+observation contract in `skills/audit/SKILL.md` for supported probes.

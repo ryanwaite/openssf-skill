@@ -21,11 +21,21 @@ default**.
     A–F posture grade + remediation roadmap.
   - **Fusion logic:** `ensemble/risk-model.md` (normalize → weight by mode →
     escalate → map to outcome). **Output:** `ensemble/report-template.md`.
-  - **Runner:** `python3 scripts/ensemble-eval.py --target <t> --mode <consume|produce>`.
+  - **Runner:** `python3 <installed-skill>/scripts/ensemble-eval.py --target <t> --mode <consume|produce>`.
 
-Rules: mode sets the weights, never skip a probe (un-run = `unknown`, not "fine"),
-live secrets and unpatched CRITICAL CVEs cap the verdict, every claim cites a
-tool, every verdict shows its math.
+This routing requires the **full skill package** (`SKILL.md`, `skills/`,
+`scripts/`, `references/`, `templates/`, `workflows/`, `ensemble/`). If this
+instructions file was copied alone, give secure-coding and specific-control
+guidance directly; do not claim `/openssf` or bundled files are installed.
+Resolve paths from the installed skill directory, not the target's cwd.
+Start with known critical risks and a small actionable next step. A policy,
+targeted remediation or one artifact does **not** require installing all
+scanners, enabling every GitHub feature or running a complete audit. A local
+presence/readiness score is not a security grade; remote defaults and
+centralized controls may be unknown. For an audit, evaluate applicable probes,
+mark un-run evidence `unknown`, keep positive incomplete outcomes provisional,
+and show the evidence/math; do not turn evidence requirements into a gate on
+advisor work.
 
 ---
 

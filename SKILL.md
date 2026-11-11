@@ -27,6 +27,11 @@ This skill set has **two modes**. Read the request and route to the right one.
 | Assess / grade a project they build & ship | **`skills/audit/produce`** → A–F grade + roadmap |
 | Deep-dive one capability (Scorecard, SBOM, signing, secrets, SLSA, threat model, …) | the matching folder in **`references/`** |
 
+Resolve these paths **relative to this installed `SKILL.md`**, not to the
+project being assessed. For example, run `python3 <skill-directory>/scripts/assess-project.py <target-directory>`.
+If only `.github/copilot-instructions.md` was copied into the project, these
+bundled files do not exist; provide direct secure-coding guidance instead.
+
 ### The two modes in one line each
 - **advisor** — *"help me build or fix this specific thing."* Assess → recommend
   prioritized next steps → guide the user through creating the artifact using
@@ -40,17 +45,24 @@ This skill set has **two modes**. Read the request and route to the right one.
 If the ask is "how good/safe is this," start at `skills/audit`. When genuinely
 ambiguous, ask once.
 
+Start with the most urgent **known, applicable** risk (e.g. exposed credential
+or known critical vulnerability), then offer one small next action. Do not
+require all scanners, GitHub features, an SBOM, or a full audit before helping
+with a policy, fix, targeted scan, or artifact. Missing local files are not
+critical findings.
+
 ## The audit model in one breath
-1. **Mode** — Consume (don't own it) vs Produce (own it). Mode sets the weights.
-2. **Run the battery** — never skip a probe; an un-run probe is `unknown`, not "fine."
+1. **Mode** — Consume (don't own it) vs Produce (own it). Mode determines applicable probes and weights.
+2. **Run applicable probes for an audit** — an un-run probe is `unknown`, not "fine."
 3. **Fuse** — normalize → weight → escalate (live secrets / critical CVEs cap the
    verdict) per `ensemble/risk-model.md`.
 4. **Report** — one verdict + evidence + ranked risks + actions, per
    `ensemble/report-template.md`.
 
 ## Tooling
-- `scripts/assess-project.py` — local language/artifact detection (used by both modes).
+- `scripts/assess-project.py` — stdlib-only local artifact inventory/readiness; its legacy `security_score` is not an audit verdict or evidence of enforced controls.
 - `scripts/ensemble-eval.py` — runs the audit ensemble and emits a fused
   JSON/Markdown verdict (degrades gracefully when a tool isn't installed).
 
-Every conclusion cites the tool behind it. Every verdict shows its math.
+Every audit conclusion cites its evidence. Qualify positive verdicts with
+incomplete evidence as provisional; this is never a gate on advisor work.

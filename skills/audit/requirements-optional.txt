@@ -1,0 +1,3 @@
+# Optional CVSS vector parsing for OSV-Scanner findings. The evaluator runs without it.
+# cvss is LGPLv3+; https://github.com/RedHatProductSecurity/cvss
+cvss==3.6

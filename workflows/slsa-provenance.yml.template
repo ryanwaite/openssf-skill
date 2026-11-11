@@ -1,107 +1,67 @@
-# SLSA Provenance Workflow
-# This workflow generates SLSA Level 3 provenance for release artifacts.
-# Provenance helps consumers verify the integrity of your software.
-
-name: SLSA Provenance
+# Adapt `make build` to create the actual release files in a flat dist/ directory.
+# This generates provenance for those files; it does not by itself certify SLSA Build L3.
+# Only published tagged releases run this template (no branch-based manual dispatch).
+name: Release artifact provenance
 
 on:
   release:
     types: [published]
 
-  # Allow manual triggering for testing
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: 'Tag to build (e.g., v1.0.0)'
-        required: true
-
 permissions:
-  contents: write
-  id-token: write
+  contents: read
 
 jobs:
-  # Build job - customize this for your project
   build:
-    name: Build Artifacts
     runs-on: ubuntu-latest
     outputs:
       digests: ${{ steps.hash.outputs.digests }}
-
     steps:
-      - name: Checkout code
-        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
         with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
-
-      # =======================================================
-      # CUSTOMIZE: Add your build steps here
-      # =======================================================
-      - name: Build
-        run: |
-          echo "Add your build commands here"
-          # Example for Go:
-          # go build -o dist/myapp ./cmd/myapp
-
-          # Example for Node.js:
-          # npm ci
-          # npm run build
-
-          # Example for Python:
-          # python -m build
-
-          mkdir -p dist
-          echo "placeholder" > dist/artifact.txt
-
-      # =======================================================
-      # Generate hashes for SLSA provenance
-      # =======================================================
-      - name: Generate artifact hashes
+          persist-credentials: false
+      - name: Build release artifacts
+        run: make build
+      - name: Hash only the artifacts that will be released
         id: hash
+        shell: bash
         run: |
-          cd dist
-          # Generate SHA256 hashes for all artifacts
-          sha256sum * > checksums.txt
-          # Encode for SLSA generator
-          echo "digests=$(base64 -w0 checksums.txt)" >> $GITHUB_OUTPUT
-
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@5d5d22a31266ced268874388b861e4b58bb5c2f3 # v4.3.1
+          shopt -s nullglob
+          files=(dist/*)
+          ((${#files[@]})) || { echo "No dist/ files built" >&2; exit 1; }
+          for file in "${files[@]}"; do
+            [[ -f "$file" ]] || { echo "Only flat dist/ files are supported: $file" >&2; exit 1; }
+          done
+          echo "digests=$(cd dist && sha256sum -- * | base64 -w0)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@5d5d22a31266ced268874388b861e4b58bb5c2f3 # v4.3.1
         with:
           name: build-artifacts
-          path: dist/
+          path: dist/*
           if-no-files-found: error
 
-  # Generate SLSA provenance
   provenance:
-    name: Generate Provenance
     needs: build
     permissions:
       actions: read
       id-token: write
       contents: write
-    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.0.0
+    # Exception: the generator verifies its builder identity using this full semver tag.
+    # A SHA or shortened version tag fails; pin other actions to immutable commit hashes.
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0
     with:
       base64-subjects: "${{ needs.build.outputs.digests }}"
-      upload-assets: true  # Attach provenance to GitHub release
+      upload-assets: true
 
-  # Upload artifacts to release
-  release:
-    name: Upload to Release
+  release-assets:
     needs: [build, provenance]
     runs-on: ubuntu-latest
-    if: github.event_name == 'release'
-
     permissions:
       contents: write
-
     steps:
-      - name: Download artifacts
-        uses: actions/download-artifact@c850b930e6ba138125429b7e5c93fc707a7f8427 # v4.1.4
+      - uses: actions/download-artifact@c850b930e6ba138125429b7e5c93fc707a7f8427 # v4.1.4
         with:
           name: build-artifacts
           path: dist/
-
-      - name: Upload release assets
-        uses: softprops/action-gh-release@9d7c94cfd0a1f3ed45544c887983e9fa900f0564 # v2.0.4
+      - uses: softprops/action-gh-release@9d7c94cfd0a1f3ed45544c887983e9fa900f0564 # v2.0.4
         with:
           files: dist/*
+          fail_on_unmatched_files: true

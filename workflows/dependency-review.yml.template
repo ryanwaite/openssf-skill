@@ -1,6 +1,8 @@
 # Dependency Review Workflow
 # This workflow checks for vulnerable or unwanted dependencies in pull requests.
-# It prevents merging PRs that introduce known vulnerabilities.
+# Start with this PR check; OSV scanning is an independent, optional follow-on.
+# Requires the dependency graph/API (public repos or private repos with GHAS).
+# Dependency Review v5 needs Actions Runner 2.327.1+ on self-hosted runners.
 
 name: Dependency Review
 
@@ -10,7 +12,6 @@ on:
 
 permissions:
   contents: read
-  pull-requests: write
 
 jobs:
   dependency-review:
@@ -19,74 +20,37 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Dependency Review
-        uses: actions/dependency-review-action@9129d7d40b8c12c1ed0f60f5c3e9d0b76d9f7e1b # v4.1.3
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
         with:
           # Fail on vulnerabilities with these severities
           fail-on-severity: moderate
 
-          # Deny these licenses (optional)
-          # deny-licenses: GPL-3.0, AGPL-3.0
-
-          # Allow these licenses (optional, use instead of deny)
+          # Optional: license allowlist (deny-licenses is deprecated in v5).
           # allow-licenses: MIT, Apache-2.0, BSD-3-Clause
 
-          # Fail if any vulnerabilities are found (stricter)
+          # Optional: also gate development-scope vulnerabilities.
           # fail-on-scopes: runtime, development
 
-          # Allow specific packages with vulnerabilities (use sparingly)
+          # Optional: document any advisory exception before adding it.
           # allow-ghsas: GHSA-xxxx-xxxx-xxxx
 
-          # Comment on PR with results
-          comment-summary-in-pr: always
 
-  # Optional: Run OSV-Scanner for additional coverage
-  osv-scan:
-    name: OSV Scanner
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
-
-      - name: Run OSV-Scanner
-        uses: google/osv-scanner-action@v1
-        with:
-          scan-args: |-
-            --recursive
-            .
-
-  # Optional: Run npm/pip/cargo audit for language-specific checks
-  # Uncomment the relevant sections for your project
-
-  # npm-audit:
-  #   name: npm Audit
-  #   runs-on: ubuntu-latest
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #     - uses: actions/setup-node@v4
-  #       with:
-  #         node-version: '20'
-  #     - run: npm ci
-  #     - run: npm audit --audit-level=moderate
-
-  # pip-audit:
-  #   name: pip Audit
-  #   runs-on: ubuntu-latest
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #     - uses: actions/setup-python@v5
-  #       with:
-  #         python-version: '3.11'
-  #     - run: pip install pip-audit
-  #     - run: pip-audit -r requirements.txt
-
-  # cargo-audit:
-  #   name: cargo Audit
-  #   runs-on: ubuntu-latest
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #     - run: cargo install cargo-audit
-  #     - run: cargo audit
+  # Optional OSV PR diff scan: uncomment only this job when you want it.
+  # Requires access to google/osv-scanner-action and a runner with its toolchain.
+  # osv-pr:
+  #   permissions:
+  #     actions: read
+  #     contents: read
+  #     security-events: write
+  #   uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable-pr.yml@b1d267aea5211fa648d9d442fa64b90dbdcbdd36 # v2.7.0
+  #   with:
+  #     fail-on-vuln: true
+  #     upload-sarif: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
+  #     scan-args: |-
+  #       --no-call-analysis=go
+  #       --recursive
+  #       ./
+  # Fork PRs may lack security-events:write; this skips their SARIF upload.

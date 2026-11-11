@@ -84,7 +84,10 @@ Follow the guidelines below for the type of content you're adding or modifying.
 
 ### Security
 
-- Hash-pin all GitHub Actions in workflow templates (not just version tags)
+- Hash-pin GitHub Actions in workflow templates. The SLSA GitHub generator
+  reusable workflow is the narrow exception: it requires a full semver tag
+  (for example `@v2.1.0`) for builder identity verification; a hash or
+  abbreviated version tag fails. Keep other actions pinned to commit hashes.
 - Follow the security patterns this project teaches
 - Never include real secrets, API keys, or credentials — even in examples
 - Use obviously fake placeholder values (e.g., `AKIAIOSFODNN7EXAMPLE`)

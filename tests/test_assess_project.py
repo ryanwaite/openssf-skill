@@ -7,7 +7,7 @@ Or:       python3 tests/test_assess_project.py
 """
 
 import json
-import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -109,6 +109,24 @@ class TestDetectLanguages(unittest.TestCase):
         langs = assess_project.detect_languages(self.project)
         lang_names = [l['language'] for l in langs]
         self.assertNotIn('javascript', lang_names)
+
+    def test_excludes_nested_vendor_and_git_without_reentering(self):
+        for folder in ('node_modules', '.git', 'vendor', '.venv'):
+            nested = self.project / 'packages' / 'app' / folder / 'pkg'
+            nested.mkdir(parents=True)
+            (nested / 'Cargo.toml').write_text('[package]\n')
+            (nested / 'index.js').write_text('var x = 1;\n')
+        (self.project / 'packages' / 'app' / 'src').mkdir()
+        (self.project / 'packages' / 'app' / 'src' / 'main.py').write_text('pass\n')
+        self.assertEqual([lang['language'] for lang in
+                          assess_project.detect_languages(self.project)], ['python'])
+
+    def test_detects_monorepo_indicator_beneath_source(self):
+        nested = self.project / 'packages' / 'service'
+        nested.mkdir(parents=True)
+        (nested / 'go.mod').write_text('module example.com/service\n')
+        self.assertIn('go', [lang['language'] for lang in
+                             assess_project.detect_languages(self.project)])
 
     def test_package_manager_populated(self):
         (self.project / 'go.mod').write_text('module test\n')
@@ -286,6 +304,46 @@ class TestBranchProtectionIndicators(unittest.TestCase):
         bp = assess_project.check_branch_protection_indicators(self.project)
         self.assertFalse(bp['pr_template_exists'])
         self.assertFalse(bp['codeowners_exists'])
+        self.assertEqual(bp['status'], 'unknown')
+
+
+class TestSecurityCapabilities(unittest.TestCase):
+    """Local configuration is neither enabled defaults nor execution evidence."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.project = Path(self.tmpdir.name)
+        self.workflows = self.project / '.github' / 'workflows'
+        self.workflows.mkdir(parents=True)
+
+    def tearDown(self):
+        self.tmpdir.cleanup()
+
+    def capabilities(self):
+        return assess_project.check_security_capabilities(
+            self.project, assess_project.check_security_artifacts(self.project))
+
+    def test_named_file_does_not_prove_codeql(self):
+        (self.workflows / 'codeql.yml').write_text('name: CodeQL\njobs: {}\n')
+        self.assertEqual(self.capabilities()['code_scanning']['status'], 'unknown')
+
+    def test_custom_named_workflow_detects_codeql_and_gitleaks_config_alone_does_not(self):
+        (self.project / '.gitleaks.toml').write_text('[extend]\nuseDefault = true\n')
+        (self.workflows / 'security.yml').write_text(
+            'steps:\n  - uses: github/codeql-action/analyze@v4\n')
+        caps = self.capabilities()
+        self.assertEqual(caps['code_scanning']['status'], 'configured')
+        self.assertEqual(caps['secrets_scanning']['status'], 'unknown')
+        self.assertTrue(caps['secrets_scanning']['config_only'])
+        self.assertIn('unverified', caps['code_scanning']['note'])
+
+    def test_reusable_workflow_stays_unknown(self):
+        (self.workflows / 'ci.yaml').write_text(
+            'jobs:\n  scan:\n    uses: org/shared/.github/workflows/scan.yml@v1\n')
+        caps = self.capabilities()
+        self.assertEqual(caps['code_scanning']['status'], 'unknown')
+        self.assertEqual(caps['secrets_scanning']['status'], 'unknown')
+        self.assertEqual(caps['reusable_workflows']['evidence'], ['.github/workflows/ci.yaml'])
 
 
 class TestGenerateRecommendations(unittest.TestCase):
@@ -304,7 +362,8 @@ class TestGenerateRecommendations(unittest.TestCase):
         self.assertIn('Create SECURITY.md', actions)
         # Should be highest priority
         sec_rec = [r for r in recs if r['action'] == 'Create SECURITY.md'][0]
-        self.assertEqual(sec_rec['priority'], 'critical')
+        self.assertEqual(sec_rec['priority'], 'high')
+        self.assertNotIn('critical', [rec['priority'] for rec in recs])
 
     def test_no_security_policy_rec_when_exists(self):
         artifacts = self._empty_artifacts()
@@ -333,6 +392,9 @@ class TestGenerateRecommendations(unittest.TestCase):
         actions = [r['action'] for r in recs]
         pip_audit_recs = [a for a in actions if 'pip-audit' in a]
         self.assertTrue(len(pip_audit_recs) > 0, 'Should recommend pip-audit for Python')
+        self.assertLess(
+            actions.index('Check known vulnerability advisories for direct dependencies'),
+            actions.index('Enable Dependabot or Renovate'))
 
     def test_multiple_language_recommendations(self):
         artifacts = self._empty_artifacts()
@@ -355,15 +417,50 @@ class TestGenerateRecommendations(unittest.TestCase):
 
     def test_scorecard_recommended_when_ci_exists(self):
         artifacts = self._empty_artifacts()
-        recs = assess_project.generate_recommendations([], artifacts, {'has_ci': True, 'has_tests': True})
+        recs = assess_project.generate_recommendations(
+            [], artifacts, {'has_ci': True, 'has_tests': True,
+                            'ci_systems': {'github_actions': True}})
         actions = [r['action'] for r in recs]
-        self.assertIn('Add OpenSSF Scorecard workflow', actions)
+        self.assertTrue(any('Scorecard coverage' in action for action in actions))
 
     def test_no_scorecard_when_no_ci(self):
         artifacts = self._empty_artifacts()
         recs = assess_project.generate_recommendations([], artifacts, {'has_ci': False, 'has_tests': False})
         actions = [r['action'] for r in recs]
-        self.assertNotIn('Add OpenSSF Scorecard workflow', actions)
+        self.assertFalse(any('Scorecard coverage' in action for action in actions))
+
+    def test_gitlab_only_has_no_github_workflow_recommendations(self):
+        recs = assess_project.generate_recommendations(
+            [{'language': 'python'}], self._empty_artifacts(),
+            {'has_ci': True, 'has_tests': True, 'ci_systems': {'gitlab_ci': True}})
+        actions = ' '.join(rec['action'] for rec in recs)
+        self.assertNotIn('CodeQL', actions)
+        self.assertNotIn('Scorecard', actions)
+        self.assertNotIn('workflow', actions)
+        self.assertIn('pip-audit', actions)
+
+    def test_github_unsupported_language_skips_codeql(self):
+        recs = assess_project.generate_recommendations(
+            [{'language': 'elixir'}], self._empty_artifacts(),
+            {'has_ci': True, 'has_tests': True, 'ci_systems': {'github_actions': True}})
+        self.assertFalse(any('CodeQL' in r['action'] for r in recs))
+
+    def test_config_without_scan_does_not_suppress_action(self):
+        artifacts = self._empty_artifacts()
+        artifacts['gitleaks_config'] = {'exists': True}
+        recs = assess_project.generate_recommendations(
+            [], artifacts, {'has_ci': False, 'has_tests': True})
+        self.assertTrue(any('targeted secrets scan' in r['action'] for r in recs))
+
+    def test_known_local_workflow_is_still_unverified(self):
+        recs = assess_project.generate_recommendations(
+            [], self._empty_artifacts(), {'has_ci': True, 'has_tests': True,
+                                          'ci_systems': {'github_actions': True}},
+            capabilities={'secrets_scanning': {'status': 'configured'},
+                          'scorecard': {'status': 'configured'}})
+        actions = [r['action'] for r in recs]
+        self.assertIn('Verify secrets scanning runs and review findings', actions)
+        self.assertFalse(any('Scorecard coverage' in action for action in actions))
 
 
 class TestCalculateSecurityScore(unittest.TestCase):
@@ -421,6 +518,14 @@ class TestCalculateSecurityScore(unittest.TestCase):
             self.assertEqual(score['grade'], 'D')
         else:
             self.assertEqual(score['grade'], 'F')
+
+    def test_perfect_readiness_is_not_posture_verdict(self):
+        artifacts = {k: {'exists': True} for k in self._empty_artifacts()}
+        score = assess_project.calculate_security_score(
+            artifacts, {'has_ci': True, 'has_tests': True})
+        self.assertEqual(score['kind'], 'local_artifact_readiness')
+        self.assertEqual(score['assurance'], 'unverified')
+        self.assertNotIn('security posture', score['assessment'].lower())
 
     def test_branch_protection_affects_score(self):
         artifacts = self._empty_artifacts()
@@ -519,6 +624,18 @@ class TestEndToEnd(unittest.TestCase):
         json_str = json.dumps(report, indent=2)
         parsed = json.loads(json_str)
         self.assertIsInstance(parsed, dict)
+
+    def test_cli_needs_only_stdlib_and_prioritizes_local_action(self):
+        (self.project / 'src.py').write_text('pass\n')
+        proc = subprocess.run(
+            [sys.executable, '-S', str(Path(_script_dir) / 'assess-project.py'),
+             str(self.project)],
+            cwd=self.project, env={'PATH': ''}, capture_output=True, text=True, check=True)
+        report = json.loads(proc.stdout)
+        self.assertEqual(report['readiness_score'], report['security_score'])
+        self.assertEqual(report['security_score']['assurance'], 'unverified')
+        self.assertEqual(report['recommendations'][0]['action'], 'Create SECURITY.md')
+        self.assertEqual(report['summary']['critical_issues'], 0)
 
 
 if __name__ == '__main__':

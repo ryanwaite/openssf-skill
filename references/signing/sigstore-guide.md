@@ -1,359 +1,51 @@
-# Sigstore: Artifact Signing & Verification
+# Sigstore: Sign and Verify a Release Artifact
 
-Sigstore is an open-source project under the OpenSSF that provides free, easy-to-use tools for signing, verifying, and protecting software artifacts. It eliminates the need for managing long-lived signing keys.
+Signing is a **separate release control**, not a prerequisite for publishing a security policy, remediating a dependency, or generating an SBOM. First identify one actual release artifact and its expected digest, signer identity, and OIDC issuer. Then sign, publish verification material, and test verification as a consumer. OSPS **BR-06.01** (signed releases or a signed manifest covering every asset) is **Level 2**, not a Level 1 prerequisite.
 
-## Why Sigstore?
+## Cosign 3.1.4
 
-Traditional code signing requires:
-- Generating and storing private keys securely
-- Managing key rotation and revocation
-- Distributing public keys to verifiers
+Use the [Cosign v3.1.4 release](https://github.com/sigstore/cosign/releases/tag/v3.1.4) appropriate to your OS, and verify its published checksum before running it. If building with Go, use `go install github.com/sigstore/cosign/v3/cmd/cosign@v3.1.4` with a compatible Go toolchain; the former `/v2` module path is not a Cosign v3 installation. The v3 series began at **v3.0.1**, not a published v3.0.0. Run `cosign version` and review the [versioned command reference](https://github.com/sigstore/cosign/tree/v3.1.4/doc) before changing release automation.
 
-Sigstore solves this with **keyless signing** — developers authenticate via OpenID Connect (GitHub, Google, Microsoft), and Sigstore issues short-lived certificates tied to their identity.
-
----
-
-## Sigstore Components
-
-| Component | Purpose |
-|-----------|---------|
-| **Cosign** | Sign and verify container images and blobs |
-| **Fulcio** | Certificate authority — issues short-lived certificates |
-| **Rekor** | Transparency log — immutable record of signing events |
-| **Gitsign** | Sign Git commits with Sigstore |
-| **sigstore-python** | Python library and CLI for signing/verification |
-| **sigstore-js** | JavaScript/TypeScript library for signing/verification |
-
----
-
-## Cosign: Container Image Signing
-
-### Installation
+### Single local blob: smallest complete flow
 
 ```bash
-# macOS
-brew install cosign
+# Replace the filename; keyless signing opens an OIDC login when not in CI.
+cosign sign-blob --yes --bundle myapp.tar.gz.sigstore.json myapp.tar.gz
+sha256sum myapp.tar.gz
 
-# Linux (Go install)
-go install github.com/sigstore/cosign/v2/cmd/cosign@latest
-
-# Verify installation
-cosign version
+# Copy the artifact, its bundle, and the expected SHA-256 digest to the consumer.
+# Replace the policy values with the actual expected signer and issuer.
+sha256sum myapp.tar.gz
+cosign verify-blob --bundle myapp.tar.gz.sigstore.json \
+  --certificate-identity 'maintainer@example.org' \
+  --certificate-oidc-issuer 'https://accounts.google.com' \
+  myapp.tar.gz
 ```
 
-### Keyless Signing (Recommended)
+Compare the **received** file's digest with a digest obtained through a trusted channel, then verify the bundle against the expected identity and issuer. The bundle is **required for this flow**: it carries the signature, certificate, and transparency-log verification material. Publish it next to the exact release asset; a `.sig` and `.cert` pair from an older example is not a substitute for this v3 bundle workflow. Signing the file does not establish that it came from the expected source or that dependencies are safe.
+
+For private Sigstore deployments, establish and distribute an independently trusted root and appropriate signing configuration; Cosign 3 uses a TUF-provided signing configuration and trust material by default for the public service. Use `--trusted-root` only with a root whose provenance you have validated. Do not turn off certificate, transparency-log, or trust checks to make verification pass. For offline verification, provide the bundle **and** independently trusted root, and verify the configured policy. See [Cosign signing configuration](https://github.com/sigstore/cosign/blob/v3.1.4/doc/cosign_signing-config.md) and [trusted roots](https://github.com/sigstore/cosign/blob/v3.1.4/doc/cosign_trusted-root.md).
+
+### OCI image
+
+Sign the immutable image digest after pushing the image:
 
 ```bash
-# Sign a container image (opens browser for OIDC authentication)
-cosign sign myregistry.io/myimage:v1.0.0
-
-# Sign with GitHub Actions OIDC (no browser needed in CI)
-cosign sign myregistry.io/myimage@sha256:abc123...
+# Replace the example with the digest returned by the image push.
+cosign sign --yes 'ghcr.io/owner/image@sha256:<actual-64-hex-digest>'
+cosign verify \
+  --certificate-identity 'https://github.com/owner/repo/.github/workflows/release.yml@refs/tags/v1.0.0' \
+  --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+  'ghcr.io/owner/image@sha256:<actual-64-hex-digest>'
 ```
 
-### Keyless Verification
+Registry signature discovery may use legacy Cosign tag storage or OCI 1.1 referrers depending on registry/tool support; check the registry's referrers behavior before enforcing a policy. Never verify only a mutable tag, assume a signer from an arbitrary certificate, or set `COSIGN_EXPERIMENTAL=1` (not needed for the v3 keyless flow). Grant `id-token: write` **only to the GitHub Actions job that needs keyless OIDC**; restrict registry write permission to the signing/publishing job.
 
-```bash
-# Verify an image signed with keyless signing
-cosign verify myregistry.io/myimage:v1.0.0 \
-  --certificate-identity=user@example.com \
-  --certificate-oidc-issuer=https://accounts.google.com
+For other signing needs, [Gitsign](https://github.com/sigstore/gitsign) addresses Git commits rather than release asset signatures; [sigstore-python](https://github.com/sigstore/sigstore-python) and [sigstore-js](https://github.com/sigstore/sigstore-js) expose language-specific flows. Rekor is a transparency log, not a substitute for checking the signer identity or artifact digest. If enforcing admission with a [Sigstore policy controller](https://docs.sigstore.dev/policy-controller/overview/), first test a policy against a known-good digest and explicitly chosen issuer/identity; make admission blocking only after that policy is verified. These are optional next steps, not prerequisites to signing one blob.
 
-# Verify by GitHub Actions identity
-cosign verify myregistry.io/myimage:v1.0.0 \
-  --certificate-identity=https://github.com/owner/repo/.github/workflows/release.yml@refs/tags/v1.0.0 \
-  --certificate-oidc-issuer=https://token.actions.githubusercontent.com
-```
+## Package-registry alternatives (context-dependent)
 
-### Signing Blobs (Non-Container Artifacts)
+- **npm trusted publishing** is an OIDC-based publishing option for supported providers/runners. Configure a publisher in npm, use npm **11.5.1+** and Node.js **22.14+** where applicable, grant the job `id-token: write`, and check the [current provider and runner restrictions](https://docs.npmjs.com/trusted-publishers/). `npm publish --provenance` applies only when its required CI/registry conditions are met; npm 9.5+ does **not** make every publication automatically carry provenance. Verify the actual published package and its attestation rather than inferring it from a command.
+- **PyPI trusted publishing** may attach a [PEP 740 attestation](https://docs.pypi.org/attestations/) **per distribution**. Confirm that each wheel and sdist has the expected attestation and digest; an attestation does not independently prove source correctness or satisfy SLSA Build Level 3.
 
-```bash
-# Sign a release binary
-cosign sign-blob myapp-v1.0.0-linux-amd64 \
-  --output-signature myapp-v1.0.0-linux-amd64.sig \
-  --output-certificate myapp-v1.0.0-linux-amd64.cert
-
-# Verify the signed blob
-cosign verify-blob myapp-v1.0.0-linux-amd64 \
-  --signature myapp-v1.0.0-linux-amd64.sig \
-  --certificate myapp-v1.0.0-linux-amd64.cert \
-  --certificate-identity=user@example.com \
-  --certificate-oidc-issuer=https://accounts.google.com
-```
-
-### Key-Based Signing (When Keyless Isn't Possible)
-
-```bash
-# Generate a key pair
-cosign generate-key-pair
-
-# Sign with key
-cosign sign --key cosign.key myregistry.io/myimage:v1.0.0
-
-# Verify with public key
-cosign verify --key cosign.pub myregistry.io/myimage:v1.0.0
-```
-
----
-
-## GitHub Actions Integration
-
-### Sign Container Images in CI
-
-```yaml
-# .github/workflows/release.yml
-name: Release with Signing
-on:
-  push:
-    tags: ['v*']
-
-permissions:
-  contents: read
-  packages: write
-  id-token: write  # Required for keyless signing
-
-jobs:
-  build-and-sign:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-
-      - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
-
-      - name: Log in to GHCR
-        uses: docker/login-action@9780b0c442fbb1117ed29e0efdff1e18412f7567 # v3.3.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build and push image
-        id: build
-        uses: docker/build-push-action@4f58ea79222b3b9dc2c8bbdd6debcef730109a75 # v6.9.0
-        with:
-          push: true
-          tags: ghcr.io/${{ github.repository }}:${{ github.ref_name }}
-
-      - name: Sign the image
-        run: cosign sign --yes ghcr.io/${{ github.repository }}@${{ steps.build.outputs.digest }}
-        env:
-          COSIGN_EXPERIMENTAL: 1
-```
-
-### Sign Release Binaries
-
-```yaml
-# .github/workflows/release-binaries.yml
-name: Release Binaries
-on:
-  push:
-    tags: ['v*']
-
-permissions:
-  contents: write
-  id-token: write
-
-jobs:
-  release:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-
-      - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
-
-      - name: Build binaries
-        run: |
-          # Your build commands here
-          echo "building..."
-
-      - name: Sign all release artifacts
-        run: |
-          for file in dist/*; do
-            cosign sign-blob --yes "$file" \
-              --output-signature "${file}.sig" \
-              --output-certificate "${file}.cert"
-          done
-
-      - name: Upload to GitHub Release
-        uses: softprops/action-gh-release@c95fe1489396fe8a9eb87c0abf8aa5b2ef267fda # v2.2.1
-        with:
-          files: |
-            dist/*
-            dist/*.sig
-            dist/*.cert
-```
-
----
-
-## Gitsign: Signing Git Commits
-
-### Installation
-
-```bash
-# macOS
-brew install gitsign
-
-# Go install
-go install github.com/sigstore/gitsign@latest
-```
-
-### Configuration
-
-```bash
-# Configure Git to use Gitsign (per-repo)
-cd myproject
-git config commit.gpgsign true
-git config tag.gpgsign true
-git config gpg.x509.program gitsign
-git config gpg.format x509
-
-# Or configure globally
-git config --global commit.gpgsign true
-git config --global tag.gpgsign true
-git config --global gpg.x509.program gitsign
-git config --global gpg.format x509
-```
-
-### Usage
-
-```bash
-# Commits are now automatically signed (opens browser for OIDC)
-git commit -m "feat: add new feature"
-
-# Verify a commit signature
-git verify-commit HEAD
-
-# Verify with Gitsign-specific details
-gitsign verify --certificate-identity=user@example.com \
-  --certificate-oidc-issuer=https://accounts.google.com
-```
-
----
-
-## Rekor Transparency Log
-
-Every Sigstore signing event is recorded in Rekor, an immutable, tamper-resistant log.
-
-### Querying Rekor
-
-```bash
-# Install rekor-cli
-go install github.com/sigstore/rekor/cmd/rekor-cli@latest
-
-# Search for entries by email
-rekor-cli search --email user@example.com
-
-# Get a specific entry
-rekor-cli get --uuid <entry-uuid>
-
-# Search by artifact SHA
-rekor-cli search --sha sha256:abc123...
-```
-
-### Rekor Web UI
-
-Browse the public transparency log at: https://search.sigstore.dev/
-
----
-
-## Language-Specific Signing
-
-### Python (sigstore-python)
-
-```bash
-# Install
-pip install sigstore
-
-# Sign a Python package
-python -m sigstore sign dist/mypackage-1.0.0.tar.gz
-
-# Verify
-python -m sigstore verify identity dist/mypackage-1.0.0.tar.gz \
-  --cert-identity user@example.com \
-  --cert-oidc-issuer https://accounts.google.com
-```
-
-### npm (sigstore-js)
-
-npm packages published to the npm registry are automatically signed with Sigstore provenance starting from npm v9.5.0+:
-
-```bash
-# Publish with provenance (in GitHub Actions)
-npm publish --provenance
-```
-
-Verify:
-
-```bash
-# Check provenance of an installed package
-npm audit signatures
-```
-
----
-
-## Verification Policies
-
-### Kubernetes (cosign policy-controller)
-
-Enforce that only signed images run in your cluster:
-
-```yaml
-# policy.yaml
-apiVersion: policy.sigstore.dev/v1beta1
-kind: ClusterImagePolicy
-metadata:
-  name: require-signed-images
-spec:
-  images:
-    - glob: "ghcr.io/myorg/**"
-  authorities:
-    - keyless:
-        identities:
-          - issuer: https://token.actions.githubusercontent.com
-            subject: https://github.com/myorg/myrepo/.github/workflows/release.yml@refs/tags/*
-```
-
----
-
-## Best Practices
-
-### Do
-
-- **Use keyless signing** — avoids key management complexity and security risks
-- **Verify in CI/CD** — automatically verify signatures before deploying
-- **Pin cosign by hash** in GitHub Actions workflows
-- **Use OIDC identity** from GitHub Actions (no manual secrets needed)
-- **Check the Rekor log** to audit signing history
-- **Sign container images by digest**, not tag (tags are mutable)
-
-### Don't
-
-- **Don't store private keys in CI** if you can use keyless signing instead
-- **Don't skip verification** — signing without verification provides no security value
-- **Don't sign by tag** — always use the image digest (`@sha256:...`)
-- **Don't ignore certificate identity** in verification (always specify `--certificate-identity` and `--certificate-oidc-issuer`)
-
----
-
-## Migration from Traditional Signing
-
-| Traditional | Sigstore Equivalent |
-|-------------|-------------------|
-| GPG key pair | Keyless signing (cosign sign) |
-| Key distribution | Rekor transparency log |
-| Key revocation | Short-lived certificates (auto-expire) |
-| PGP signatures on releases | cosign sign-blob |
-| GPG-signed commits | Gitsign |
-| Notary v1 (Docker Content Trust) | Cosign |
-
----
-
-## References
-
-- [Sigstore Documentation](https://docs.sigstore.dev/)
-- [Cosign GitHub](https://github.com/sigstore/cosign)
-- [Gitsign GitHub](https://github.com/sigstore/gitsign)
-- [Rekor GitHub](https://github.com/sigstore/rekor)
-- [sigstore-python](https://github.com/sigstore/sigstore-python)
-- [Sigstore: The Movie (Intro Video)](https://www.youtube.com/watch?v=wqBAZmMoAaI)
-- [OpenSSF Sigstore Project Page](https://openssf.org/community/sigstore/)
+For a later maturity upgrade, bind SBOM and provenance to the **same shipped artifact digest**, publish verification instructions, and enforce identity/issuer/digest policy in the consuming deployment. None of those optional integrations is required before taking the first signing step.

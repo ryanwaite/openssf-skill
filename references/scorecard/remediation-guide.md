@@ -371,49 +371,14 @@ jobs:
 
 ## Comprehensive Remediation Workflow
 
-Add this workflow to continuously monitor and improve your score:
-
-```yaml
-# .github/workflows/scorecard.yml
-name: OpenSSF Scorecard
-
-on:
-  schedule:
-    - cron: '0 6 * * 1'  # Weekly on Monday
-  push:
-    branches: [main]
-  workflow_dispatch:
-
-permissions: read-all
-
-jobs:
-  analysis:
-    name: Scorecard Analysis
-    runs-on: ubuntu-latest
-    permissions:
-      security-events: write
-      id-token: write
-      contents: read
-      actions: read
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-
-      - name: Run Scorecard
-        uses: ossf/scorecard-action@v2
-        with:
-          results_file: results.sarif
-          results_format: sarif
-          publish_results: true
-
-      - name: Upload to Security Tab
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: results.sarif
-```
+After addressing the highest-impact findings, copy the
+[Scorecard workflow template](../../workflows/scorecard.yml.template) to
+`.github/workflows/scorecard.yml` and customize its branches. It runs on
+schedule/push and can publish public results and upload SARIF when those
+capabilities are available. For an immediate start without enabling workflows
+or publishing anything, run `scorecard --repo=github.com/owner/repo` locally.
+Read the [execution and permission notes](checks-reference.md#automated-scanning-workflow)
+before enabling the optional hosted integrations.
 
 ---
 

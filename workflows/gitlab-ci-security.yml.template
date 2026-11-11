@@ -1,345 +1,80 @@
-# GitLab CI Security Templates
-
-These templates replicate the GitHub Actions security workflows for GitLab CI/CD.
-
-## Dependency Scanning
-
-```yaml
-# .gitlab-ci.yml (merge with existing)
-
+# Copy this file to .gitlab-ci.yml, or merge individual jobs into your existing
+# pipeline (and add "release" to its stages when enabling release SBOMs).
+# Default: one blocking history scan; no project registry, SBOM, or other scanner.
+# Optional jobs are gated by CI/CD variables, not by an implicit tool battery.
+# Requires a Docker executor able to pull the named images (GHCR by default).
 stages:
   - test
-  - security
-
-# ─── OSV Scanner ───────────────────────────────────────────────
-
-osv-scanner:
-  stage: security
-  image:
-    name: ghcr.io/google/osv-scanner:latest
-    entrypoint: [""]
-  script:
-    - osv-scanner --recursive .
-  allow_failure: true
-  rules:
-    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
-    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
-
-# ─── Language-Specific Scans ──────────────────────────────────
-
-# Python
-pip-audit:
-  stage: security
-  image: python:3.13-slim
-  before_script:
-    - pip install pip-audit
-  script:
-    - pip-audit -r requirements.txt
-  allow_failure: true
-  rules:
-    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
-      exists:
-        - requirements.txt
-    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
-      exists:
-        - requirements.txt
-
-# JavaScript/TypeScript
-npm-audit:
-  stage: security
-  image: node:22-slim
-  script:
-    - npm audit --audit-level=high
-  allow_failure: true
-  rules:
-    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
-      exists:
-        - package.json
-    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
-      exists:
-        - package.json
-
-# Go
-govulncheck:
-  stage: security
-  image: golang:1.23
-  script:
-    - go install golang.org/x/vuln/cmd/govulncheck@latest
-    - govulncheck ./...
-  allow_failure: true
-  rules:
-    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
-      exists:
-        - go.mod
-    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
-      exists:
-        - go.mod
-
-# Rust
-cargo-audit:
-  stage: security
-  image: rust:1.83
-  before_script:
-    - cargo install cargo-audit
-  script:
-    - cargo audit
-  allow_failure: true
-  rules:
-    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
-      exists:
-        - Cargo.toml
-    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
-      exists:
-        - Cargo.toml
-```
-
----
-
-## SBOM Generation
-
-```yaml
-# .gitlab-ci.yml
-
-sbom-generation:
-  stage: security
-  image:
-    name: anchore/syft:latest
-    entrypoint: [""]
-  script:
-    # SPDX format
-    - syft dir:. -o spdx-json > sbom-spdx.json
-  artifacts:
-    paths:
-      - sbom-spdx.json
-    expire_in: 90 days
-  rules:
-    - if: $CI_COMMIT_TAG
-
-# Attach SBOM to GitLab release
-release-sbom:
-  stage: security
-  image: registry.gitlab.com/gitlab-org/release-cli:latest
-  needs:
-    - sbom-generation
-  script:
-    - echo "Attaching SBOM to release"
-  release:
-    tag_name: $CI_COMMIT_TAG
-    description: "Release $CI_COMMIT_TAG"
-    assets:
-      links:
-        - name: SBOM (SPDX)
-          url: "${CI_PROJECT_URL}/-/jobs/${CI_JOB_ID}/artifacts/file/sbom-spdx.json"
-  rules:
-    - if: $CI_COMMIT_TAG
-```
-
----
-
-## Secrets Scanning
-
-```yaml
-# .gitlab-ci.yml
-
-gitleaks:
-  stage: security
-  image:
-    name: zricethezav/gitleaks:latest
-    entrypoint: [""]
-  script:
-    - gitleaks detect --source . --verbose --report-format json --report-path gitleaks-report.json
-  artifacts:
-    paths:
-      - gitleaks-report.json
-    when: always
-    expire_in: 30 days
-  allow_failure: true
-  rules:
-    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
-    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
-```
-
----
-
-## SAST (Static Analysis)
-
-```yaml
-# .gitlab-ci.yml
-
-# Semgrep (multi-language SAST)
-semgrep:
-  stage: security
-  image:
-    name: semgrep/semgrep:latest
-    entrypoint: [""]
-  script:
-    - semgrep scan --config auto --json --output semgrep-results.json .
-  artifacts:
-    paths:
-      - semgrep-results.json
-    when: always
-    expire_in: 30 days
-  allow_failure: true
-  rules:
-    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
-    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
-
-# Python-specific (Bandit)
-bandit:
-  stage: security
-  image: python:3.13-slim
-  before_script:
-    - pip install bandit
-  script:
-    - bandit -r . -f json -o bandit-results.json || true
-  artifacts:
-    paths:
-      - bandit-results.json
-    when: always
-  rules:
-    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
-      exists:
-        - "**/*.py"
-```
-
----
-
-## Container Scanning
-
-```yaml
-# .gitlab-ci.yml
-
-container-scan:
-  stage: security
-  image:
-    name: aquasec/trivy:latest
-    entrypoint: [""]
-  variables:
-    IMAGE: "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA"
-  script:
-    - trivy image --severity HIGH,CRITICAL --exit-code 1 "$IMAGE"
-  allow_failure: true
-  rules:
-    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
-      exists:
-        - Dockerfile
-
-# Dockerfile linting
-hadolint:
-  stage: test
-  image:
-    name: hadolint/hadolint:latest-debian
-    entrypoint: [""]
-  script:
-    - hadolint Dockerfile
-  allow_failure: true
-  rules:
-    - exists:
-        - Dockerfile
-```
-
----
-
-## Complete Example
-
-A full `.gitlab-ci.yml` combining all security stages:
-
-```yaml
-stages:
-  - build
-  - test
-  - security
   - release
 
-variables:
-  IMAGE: "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA"
-
-# ─── Build ────────────────────────────────────────────────────
-
-build:
-  stage: build
-  image: docker:latest
-  services:
-    - docker:dind
-  script:
-    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
-    - docker build -t "$IMAGE" .
-    - docker push "$IMAGE"
-  rules:
-    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
-
-# ─── Tests ────────────────────────────────────────────────────
-
-test:
-  stage: test
-  script:
-    - echo "Run your tests here"
-
-# ─── Security ─────────────────────────────────────────────────
-
-include:
-  # Include any of the templates above, or inline them here
-
-osv-scanner:
-  stage: security
-  image:
-    name: ghcr.io/google/osv-scanner:latest
-    entrypoint: [""]
-  script:
-    - osv-scanner --recursive .
-  allow_failure: true
-
 gitleaks:
-  stage: security
+  stage: test
   image:
-    name: zricethezav/gitleaks:latest
+    name: ghcr.io/gitleaks/gitleaks:v8.30.1
     entrypoint: [""]
+  variables:
+    GIT_DEPTH: "0"
   script:
-    - gitleaks detect --source . --verbose
-  allow_failure: true
-
-semgrep:
-  stage: security
-  image:
-    name: semgrep/semgrep:latest
-    entrypoint: [""]
-  script:
-    - semgrep scan --config auto .
-  allow_failure: true
-
-container-scan:
-  stage: security
-  image:
-    name: aquasec/trivy:latest
-    entrypoint: [""]
-  script:
-    - trivy image --severity HIGH,CRITICAL "$IMAGE"
-  allow_failure: true
-  needs:
-    - build
+    # Do not use --verbose or upload the raw findings as an artifact.
+    - gitleaks git --redact .
   rules:
-    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
 
-# ─── Release ──────────────────────────────────────────────────
-
-sbom:
-  stage: release
+# Optional: enable ENABLE_OSV_SCAN=true in CI/CD variables to scan dependencies.
+# OSV v2's Go call analysis is enabled by default; disable it for untrusted MRs.
+# A finding and an execution error both fail this job; investigate the job log.
+osv-scanner:
+  stage: test
   image:
-    name: anchore/syft:latest
+    name: ghcr.io/google/osv-scanner:v2.7.1
     entrypoint: [""]
   script:
-    - syft dir:. -o spdx-json > sbom.json
+    - osv-scanner scan source --no-call-analysis=go --recursive .
+  rules:
+    - if: '$ENABLE_OSV_SCAN == "true" && $CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$ENABLE_OSV_SCAN == "true" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+
+# Optional: enable ENABLE_RELEASE_SBOM=true before creating a release tag.
+# This inventories source, not a built image. The binary checksum is for
+# syft v1.57.1's linux/amd64 release; use an amd64 runner for this job.
+sbom-generation:
+  stage: test
+  image: alpine:3.22
+  script:
+    - apk add --no-cache ca-certificates
+    - wget -q https://github.com/anchore/syft/releases/download/v1.57.1/syft_1.57.1_linux_amd64.tar.gz -O syft.tar.gz
+    - echo "bf52519eb57f675d47c07d43213cb6dff6449f3d6d1147ff6701ed91f44eef0c  syft.tar.gz" | sha256sum -c -
+    - tar -xzf syft.tar.gz -C /tmp syft
+    - rm syft.tar.gz
+    - /tmp/syft dir:. -o spdx-json=sbom.spdx.json
+    - printf 'SBOM_JOB_ID=%s\n' "$CI_JOB_ID" > sbom.env
   artifacts:
     paths:
-      - sbom.json
+      - sbom.spdx.json
+    reports:
+      dotenv: sbom.env
+    expire_in: 1 year
   rules:
-    - if: $CI_COMMIT_TAG
-```
+    - if: '$ENABLE_RELEASE_SBOM == "true" && $CI_COMMIT_TAG'
 
----
-
-## Notes
-
-- GitLab also provides [built-in security scanning](https://docs.gitlab.com/ee/user/application_security/) (SAST, DAST, dependency scanning, container scanning, secret detection) as part of GitLab Ultimate. The templates above use open-source tools that work on any GitLab tier.
-- For GitLab's built-in features, add `include: template: Security/SAST.gitlab-ci.yml` etc.
-- All `allow_failure: true` settings are intentional for initial rollout — remove them once your pipeline is clean to enforce security gates.
+# The release links to the SBOM *producer* job, not this release job.
+# Job artifacts expire after one year (or may be deleted sooner by an admin);
+# for permanent release assets, publish a copy to durable storage instead.
+release-sbom:
+  stage: release
+  image: registry.gitlab.com/gitlab-org/cli:v1.126.0
+  variables:
+    GLAB_ENABLE_CI_AUTOLOGIN: "true"
+  needs:
+    - job: sbom-generation
+      artifacts: true
+  script:
+    - test -n "$SBOM_JOB_ID" && test -s sbom.spdx.json
+    - |
+      glab release create "$CI_COMMIT_TAG" \
+        --name "Release $CI_COMMIT_TAG" \
+        --notes "Source SBOM for $CI_COMMIT_TAG (artifact retained for one year)." \
+        --assets-links "[{\"name\":\"Source SBOM (SPDX)\",\"url\":\"${CI_PROJECT_URL}/-/jobs/${SBOM_JOB_ID}/artifacts/file/sbom.spdx.json\",\"link_type\":\"other\"}]"
+  rules:
+    - if: '$ENABLE_RELEASE_SBOM == "true" && $CI_COMMIT_TAG'

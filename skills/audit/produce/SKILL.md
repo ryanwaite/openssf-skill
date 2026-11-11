@@ -33,8 +33,11 @@ Apply `ensemble/risk-model.md` with **PRODUCE weights** (secrets, provenance,
 code review, and your own Scorecard dominate). Apply escalation rules — a live
 secret forces an F until remediated.
 
-Grades: **A** (≥90) · **B** (80–89) · **C** (70–79) · **D** (60–69) · **F**
-(<60 or critical escalation).
+With complete weighted evidence: **A** (≥90) · **B** (80–89) · **C**
+(70–79) · **D** (60–69) · **F** (<60 or supported critical escalation).
+Partial favorable results are **INCOMPLETE**, with a separately labeled
+provisional grade. An independently supported negative cap may still warrant F. Gitleaks
+matches are *potential* secrets pending review, not verified live secrets.
 
 ## Report + roadmap
 Use `ensemble/report-template.md`. The required-actions section is a
@@ -46,3 +49,7 @@ quick wins first. Offer to apply changes directly:
 - Add a secrets pre-commit hook; enable branch protection.
 
 Re-run the ensemble after fixes to show the grade improving — close the loop.
+Do not make optional scanner installation a prerequisite to this roadmap:
+inventory locally, review findings, and implement the most critical known fix
+first. Versioned manual observations can fill supported placeholders through
+`--evidence` (see `skills/audit/SKILL.md`); a self-report is not verification.

@@ -1,6 +1,6 @@
 # OpenSSF Security Skill
 
-A comprehensive Claude Code / GitHub Copilot skill that helps developers build
+A Claude Code / GitHub Copilot skill that helps developers build
 secure applications following [OpenSSF (Open Source Security Foundation)](https://openssf.org/)
 best practices — and evaluate open source projects as an **ensemble**.
 
@@ -24,73 +24,82 @@ SBOM generation," "harden this Dockerfile." That's **advisor** mode: it assesses
 your project, recommends prioritized next steps, and walks you through building
 the artifact using the bundled references, templates, and workflows.
 
-Other times you just want a verdict. Most security tooling makes you run
-Scorecard, then OSV-Scanner, then a secrets scan, then check signing… and then
-*you* decide what it all means. **Audit** mode does the fusing for you:
+Other times you want a broader evidence-based assessment. Security tooling may
+involve Scorecard, OSV-Scanner, secrets scanning and signing verification.
+**Audit** mode fuses the available, applicable evidence:
 
 ```
         Scorecard ─┐
    OSV / audits ───┤
-         SBOM ─────┤      normalize → weight by mode → escalate      ┌─ Adopt / Avoid   (consume)
-   signing/SLSA ───┼──►   (live secrets & critical CVEs cap it)  ──► │
-       secrets ────┤            ensemble/risk-model.md                └─ A–F grade       (produce)
+         SBOM ─────┤      applicable evidence → mode-specific weights   ┌─ Adopt / Avoid   (consume)
+   signing/SLSA ───┼──►   → escalation → qualify incomplete results ──► │
+       secrets ────┤            ensemble/risk-model.md                  └─ A–F grade       (produce)
    maintenance ────┤
   OSPS Baseline ───┘
 ```
 
-The same tools run in both audit sub-modes — **the mode only changes the weights**.
+Audit modes have different applicable probes and weights. Missing evidence is
+reported as a gap; an incomplete battery is not proof of safety. You can still
+fix a specific issue without running the battery.
 
 ---
 
 ## Installation
 
-### For GitHub Copilot
+### Full skill (router, advisor, audit, scripts, templates and references)
 
-Copy the Copilot instructions file to your repository:
-
-```bash
-# Create .github directory if it doesn't exist
-mkdir -p .github
-
-# Download the instructions file
-curl -o .github/copilot-instructions.md \
-  https://raw.githubusercontent.com/ryanwaite/openssf-skill/main/.github/copilot-instructions.md
-```
-
-Then enable custom instructions in VS Code:
-1. Open Settings (`Cmd+,` or `Ctrl+,`)
-2. Search for "Copilot instruction"
-3. Enable `github.copilot.chat.codeGeneration.useInstructionFiles`
-
-Copilot will now apply OpenSSF security best practices to all code suggestions in that repository.
-
-### For Claude Code
-
-#### Option 1: Clone to Global Skills (Recommended)
+From the **target project's root**, choose *one* project location below (do
+not clone into an existing nonempty `openssf` directory):
 
 ```bash
-# Clone directly to your global skills directory
-git clone https://github.com/ryanwaite/openssf-skill.git ~/.claude/skills/openssf
+mkdir -p .github/skills
+git clone https://github.com/ryanwaite/openssf-skill.git .github/skills/openssf
 ```
 
-#### Option 2: Project-Specific Installation
+GitHub Copilot also accepts `.claude/skills/openssf` or
+`.agents/skills/openssf` as project skills. For a **personal Copilot skill**,
+clone into `~/.copilot/skills/openssf` or `~/.agents/skills/openssf` instead;
+personal skills may not be available in every cloud surface. See the
+[supported Copilot skill locations](https://docs.github.com/en/copilot/concepts/customizations/agent-skills).
+For **Claude Code**, clone into `.claude/skills/openssf` (project) or
+`~/.claude/skills/openssf` (personal). A personal installation is not needed
+to begin; use the project copy if you don't want to change your home directory.
+
+Each destination must contain `SKILL.md`, `scripts/`, `skills/`,
+`references/`, `templates/`, `workflows/` and `ensemble/`. Select a trusted
+revision before relying on its scripts or templates; cloning needs network
+access and writes only to the chosen destination. Check local files without
+any scanner or account setup:
 
 ```bash
-# Clone into your project's .claude/skills directory
-mkdir -p .claude/skills
-git clone https://github.com/ryanwaite/openssf-skill.git .claude/skills/openssf
+python3 .github/skills/openssf/scripts/assess-project.py .
 ```
 
-Then invoke the skill in any project with `/openssf`.
+Substitute your chosen installed directory for `.github/skills/openssf`. When
+you invoke `/openssf` or ask your agent for the `openssf` skill, the agent should
+load **that installation's** `SKILL.md` and resolve its relative references,
+templates, and scripts from the installed skill directory, **not** from your
+target project's current working directory. Skill invocation syntax and
+discovery vary by agent/surface. The target directory is always a separate
+argument to the local detector or audit runner.
+
+### Instructions-only Copilot (secure coding defaults, no bundled skill)
+
+If you only want secure coding guidance, copy
+[`copilot-instructions.md`](.github/copilot-instructions.md) into your
+project's `.github/copilot-instructions.md`. This is **not** a full install:
+it does not provide `/openssf`, router files, scripts, templates, or references.
+It does not run scans. Use the full skill instructions above for those assets.
 
 ---
 
 ## Usage
 
-The simplest way to get started:
+The simplest way to get started after a full install:
 1. Start GitHub Copilot or Claude Code
-2. `cd` to the root of an open source project
-3. Run `/openssf what can you do for me?`
+2. Open the target project
+3. Ask the agent to use the `openssf` skill: "What is the most important
+   security action I can take now?" (or `/openssf` where supported)
 
 The router sends your request to the right mode.
 
@@ -104,35 +113,88 @@ The router sends your request to the right mode.
 /openssf review this code for security issues
 ```
 
-The skill will:
-1. Assess your project's current security posture
-2. Detect languages and existing security artifacts
-3. Recommend prioritized security improvements
-4. Guide you through creating security artifacts
+The advisor can use local language/artifact inventory, recommend a first small
+step, and help you create a specific artifact. **No scanner, GitHub feature,
+account, SBOM, attestation, or complete audit is required to start.** For
+example, write a private vulnerability reporting policy or triage a known
+critical vulnerability right away; add automation only when useful.
+
+```bash
+python3 <installed-skill>/scripts/assess-project.py /path/to/target
+```
+
+The stdlib-only detector emits JSON. `readiness_score` measures **local file
+presence**, not enforcement or a security verdict; the deprecated
+`security_score` field retains the same numeric score, letter *readiness band*
+(A at 80+), and counts for existing consumers. This is **not** the ensemble's
+posture grade (A at 90+), an OSPS Baseline certification, or proof that
+scanners/CI ran. `capabilities` distinguishes recognized local configuration
+from unknown remote/default/centralized capabilities and unverified execution.
+`critical_issues` is a legacy count of critical-priority recommendations (not
+an incident count); this inventory cannot rule out live vulnerabilities. Start
+with its small recommendations, then verify the highest-risk applicable facts
+in context.
 
 ### Audit mode — get a verdict or grade
 
 ```
 /openssf evaluate this repo
-/openssf is express@4.18.2 safe for us to adopt?
+/openssf help evaluate a dependency with its resolved version and lockfile
 /openssf grade our security posture before release
 ```
 
-The agent establishes the mode (consume vs produce), runs the ensemble, and
-returns a verdict with evidence, ranked risks, and concrete next actions.
+The agent establishes the mode (consume vs produce), collects available
+evidence, and identifies gaps and concrete next actions. A favorable answer
+with missing evidence must remain **provisional**, never a certification.
 
 #### Run the ensemble directly
 
 ```bash
-# Evaluate a dependency you might adopt
-python3 scripts/ensemble-eval.py --target requests@2.31.0 --mode consume
+# Evaluate a local checkout using available tools
+python3 <installed-skill>/scripts/ensemble-eval.py --target /path/to/target --mode consume
 
 # Grade a repo you own
-python3 scripts/ensemble-eval.py --target . --mode produce --format md
+python3 <installed-skill>/scripts/ensemble-eval.py --target /path/to/target --mode produce --format md
+
+# Save the available evidence, then replay it without invoking scanners
+python3 <installed-skill>/scripts/ensemble-eval.py --target /path/to/target --mode produce --snapshot-out audit-snapshot.json
+python3 <installed-skill>/scripts/ensemble-eval.py --replay audit-snapshot.json --format md
 ```
 
-Any tool that isn't installed is reported as `unknown` (and lowers confidence) —
-never silently skipped.
+`INCOMPLETE` is useful, nonfatal output: the report retains available findings,
+provisional results, gaps, and actions you can start now. For supported manual
+observations, add `--evidence observations.json`; the
+[audit evidence format](skills/audit/SKILL.md#manual-evidence-and-reproducibility)
+binds observations to the requested target and mode and distinguishes manual
+review from self-report. Importing evidence does not independently verify it.
+
+Only run this broader evaluation when requested. A `package@version` string
+alone is not currently resolved to an immutable package/lockfile by the runner;
+do not use it to claim a package was scanned. Check the report for unknown,
+failed, or unsupported probes and corroborate externally before relying on a
+verdict. The suite does **not** need to run to produce one useful advisor action.
+
+### What is implemented vs. manual
+
+| Capability | Current scope | Prerequisite for one advisor action? |
+|------------|---------------|--------------------------------------|
+| Local inventory and SECURITY.md/threat-model guidance | Implemented; stdlib inventory plus bundled templates | Python 3 for the detector; none for manual guidance |
+| Scorecard, OSV and Gitleaks via audit runner | CLI adapters for suitable targets when installed; verify invocation and result coverage | No |
+| Local repository metadata / CODEOWNERS | Partial indicators, not verified review enforcement | No |
+| SBOM, signing/provenance, Baseline conformance, threat coverage | References and manual work; check current runner output for `unknown` rather than claiming an integrated verified probe | No |
+| Manual evidence and offline replay | Versioned, target-bound observations and snapshots; imported claims are not independently verified | No |
+| Package coordinate resolution, centralized/default forge controls | Not verified by local detector; unsupported without independent evidence | No |
+
+Audit evidence can require optional scanners, a resolvable repository/lockfile,
+forge permissions, and network access. The detector reads local files only;
+the audit runner may call external CLIs and network services (Scorecard, OSV,
+forge metadata). Check CLI configuration before running it: access tokens and
+private repository data can be sent to those services. Never paste secrets into
+prompts/reports; redact scanner findings and restrict any temporary outputs.
+Sigstore keyless signing and public transparency logs may publish identity and
+artifact metadata; verify identities/digests and obtain consent before
+signing, publishing, or uploading. A tool not installed is a **gap for a
+high-assurance verdict**, not a prerequisite to make progress.
 
 ---
 
@@ -192,18 +254,18 @@ From here, you can use the skill to keep implementing changes.
 | **Fusion engine** | `ensemble/risk-model.md` | Normalization, mode weights, escalation rules, outcome mapping |
 | **Output spec** | `ensemble/report-template.md` | The decision-ready report format |
 | **Runner** | `scripts/ensemble-eval.py` | Executes the audit ensemble, emits fused JSON/Markdown (degrades gracefully) |
-| **Detector** | `scripts/assess-project.py` | Local language/artifact detection |
+| **Detector** | `scripts/assess-project.py` | Local inventory/readiness (not security posture) |
 | **Grounding** | `references/` | Deep per-tool guidance both modes draw on |
 
 ### The verdict, in short (audit mode)
 
-- **Mode sets the weights.** Consume leans on known CVEs + maintenance; produce
-  leans on secrets + provenance + code review.
-- **Escalations override the average.** A live secret or an unpatched CRITICAL
-  with a fix available caps the verdict no matter how good everything else looks.
-- **Unknown ≠ fine.** Missing data lowers confidence; it never inflates the score.
-- **Every claim cites a tool. Every verdict shows its math.** Two evaluators
-  running the same tools on the same target reach the same verdict.
+- **Mode sets applicable probes and weights.** Consume leans on known CVEs +
+  maintenance; produce leans on secrets + provenance + code review.
+- **Escalations override the average.** Verified active exposures need separate
+  handling; do not infer a live secret or a fixable CRITICAL from file presence.
+- **Unknown ≠ fine.** Missing data must qualify favorable claims.
+- **Audit claims need evidence.** Verify probe status and weight math before
+  treating a report as reproducible or actionable.
 
 ---
 
@@ -264,9 +326,9 @@ openssf-skill/
 | Threat Modeling | STRIDE methodology, DFD creation, risk assessment |
 | Security Policies | SECURITY.md, vulnerability disclosure, response timelines |
 | OpenSSF Scorecard | 19 automated security checks with remediation |
-| OSPS Baseline | Level 1 compliance checklist |
+| OSPS Baseline | Versioned L1-L3 conformance guidance; no official numeric grade |
 | SBOM | SPDX generation (default) for all major languages |
-| SLSA | Supply chain security levels 0-3 |
+| SLSA | Build and Source tracks (v1.2); attestations alone do not prove Build L3 |
 | Dependencies | Vulnerability scanning, update strategies |
 | Code Review | OWASP Top 10, language-specific patterns |
 | Secrets Scanning | Gitleaks, TruffleHog, detect-secrets, pre-commit hooks |
@@ -282,8 +344,8 @@ openssf-skill/
 |------|--------------|
 | [GitHub Copilot](https://github.com/features/copilot) | Copilot instructions |
 | [Claude Code](https://claude.com/product/claude-code) | Claude Code skill |
-| Git | Cloning the repository |
-| Python 3 | Running `scripts/` and the ensemble runner |
+| Git/network access | Cloning the full skill (not required for local manual guidance) |
+| Python 3 | Running the detector or audit runner; optional CLIs depend on probe |
 
 ---
 
