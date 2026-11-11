@@ -205,6 +205,7 @@ def verify_signature(artifact_path, expected_sha256, bundle_path, expected_signe
             return _result("error", {"sha256": digest},
                            "Cosign rejected the signature, subject, signer, issuer, or trust material.")
         return _result("ok", {"sha256": digest, "signed_identity_verified": True,
+                              "expected_signer": signer, "expected_issuer": issuer,
                               "trust": "supplied_root" if root else "public_lookup",
                               "tool": "cosign"},
                        "A blob signature does not establish build provenance or a SLSA level.")

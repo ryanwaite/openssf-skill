@@ -42,10 +42,9 @@ class TestFusion(unittest.TestCase):
         signals = [
             sig("scorecard", 65), sig("known_vulns", 60), sig("maintenance", 100),
             sig("supply_chain", None, status="unknown"), sig("provenance", 40),
-            sig("baseline", 60),
         ]
         result = ee.fuse(signals, "consume")
-        self.assertEqual(result["base_score"], 68.5)
+        self.assertEqual(result["base_score"], 69.3)
         self.assertEqual(result["outcome"], "INCOMPLETE")
         self.assertEqual(result["provisional_outcome"], "Adopt with mitigations")
         self.assertEqual(result["confidence"], "low")
@@ -64,7 +63,7 @@ class TestFusion(unittest.TestCase):
         signals = [sig(name, 100, confidence="low")
                    for name in ee.MODE_WEIGHTS["produce"] if name != "known_vulns"]
         result = ee.fuse(signals, "produce")
-        self.assertEqual(result["active_weight_covered"], 0.88)
+        self.assertEqual(result["active_weight_covered"], 0.87)
         self.assertEqual(result["confidence"], "low")
         self.assertEqual(result["outcome"], "INCOMPLETE")
 
@@ -295,7 +294,8 @@ class TestAdapters(unittest.TestCase):
         advisory = {
             "id": "GHSA-123", "aliases": ["CVE-123"],
             "severity": [{"type": "CVSS_V3", "score": "9.8"}],
-            "affected": [{"ranges": [{"events": [{"fixed": "2.0"}]}]}],
+            "affected": [{"package": {"ecosystem": "npm", "name": "demo"},
+                          "ranges": [{"type": "SEMVER", "events": [{"fixed": "2.0"}]}]}],
         }
         data = {"results": [
             {"source": {"path": "a.lock", "type": "lockfile"}, "packages": [{
@@ -354,7 +354,8 @@ class TestAdapters(unittest.TestCase):
             "package": {"name": "demo", "version": "1", "ecosystem": "npm"},
             "vulnerabilities": [{"id": "CVE-123", "severity": [
                 {"type": "CVSS_V3", "score": vector}],
-                "affected": [{"ranges": [{"events": [{"fixed": "2"}]}]}]}],
+                "affected": [{"package": {"ecosystem": "npm", "name": "demo"},
+                              "ranges": [{"type": "SEMVER", "events": [{"fixed": "2"}]}]}]}],
         }]}]}
         original_run = ee._run
 
@@ -397,7 +398,8 @@ class TestAdapters(unittest.TestCase):
                 "id": "CVE-123",
                 "severity": [{"type": "CVSS_V3", "score": "9.8"},
                              {"type": "CVSS_V3", "score": "CVSS:9.9/AV:N"}],
-                "affected": [{"ranges": [{"events": [{"fixed": "2"}]}]}],
+                "affected": [{"package": {"ecosystem": "npm", "name": "demo"},
+                              "ranges": [{"type": "SEMVER", "events": [{"fixed": "2"}]}]}],
             }],
         }]}]}
         with patch.object(ee, "_have", return_value=True), \
@@ -493,17 +495,16 @@ class TestEvidence(unittest.TestCase):
             evidence.write_text(json.dumps({
                 "schema_version": 1, "target": target, "mode": "produce",
                 "observations": [{
-                    "name": "baseline", "evidence_type": "manual_observation",
-                    "facts": {"controls_met": 3, "controls_total": 4,
-                              "catalog_version": "v2026.08.28"},
-                    "source": "local checklist", "captured_at": AT,
+                    "name": "threat_coverage", "evidence_type": "manual_observation",
+                    "facts": {"coverage": "partial"},
+                    "source": "reviewed threat model", "captured_at": AT,
                     "tool": {"name": "manual", "version": "1"},
                 }],
             }))
             with patch.object(ee, "_have", return_value=False):
                 report = ee.evaluate(target, "produce", evidence, evaluated_at=AT)
-            self.assertEqual(next(s for s in report["signals"] if s["name"] == "baseline")
-                             ["subscore"], 75)
+            self.assertEqual(next(s for s in report["signals"] if s["name"] == "threat_coverage")
+                             ["subscore"], 50)
             self.assertEqual(report["verdict"]["outcome"], "INCOMPLETE")
             snapshot = Path(directory) / "snapshot.json"
             snapshot.write_text(json.dumps(report))
@@ -565,7 +566,7 @@ class TestEvidence(unittest.TestCase):
         self.assertEqual(result["status"], "unknown")
         self.assertIsNone(result["subscore"])
 
-    def test_replay_legacy_scorecard_aggregate_without_checks(self):
+    def test_policy_v1_snapshot_cannot_silently_change_its_scoring(self):
         legacy = {
             "schema_version": 1, "policy_version": "1", "target": "example/repo",
             "target_kind": "repo", "target_identity": {
@@ -577,10 +578,8 @@ class TestEvidence(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             snapshot = Path(directory) / "snapshot.json"
             snapshot.write_text(json.dumps(legacy))
-            replayed = ee.replay(snapshot)
-        self.assertEqual(replayed["actions"], legacy["actions"])
-        self.assertEqual(replayed["verdict"]["outcome"], "INCOMPLETE")
-        self.assertIn("scorecard", ee.to_markdown(replayed))
+            with self.assertRaisesRegex(ValueError, "original policy version"):
+                ee.replay(snapshot)
 
 
 if __name__ == "__main__":

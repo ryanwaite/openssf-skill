@@ -10,7 +10,8 @@ description: |
   security posture", "should we adopt <package>", "security review of <repo>",
   "OpenSSF report for <project>". Runs Scorecard, OSV/dependency scanning, SBOM
   analysis, signing/provenance checks, secrets scanning, maintenance signals,
-  and OSPS Baseline together, then fuses them into one weighted verdict.
+  and OSPS Baseline together, then reports weighted risk separately from
+  unweighted Baseline conformance.
 ---
 
 # OpenSSF Ensemble Evaluator
@@ -31,8 +32,10 @@ Determine (ask only if you can't infer) which mode applies:
 - **PRODUCE** — evaluating a project the org builds itself. You can recommend and
   apply fixes.
 
-Identify the target: repo URL(s), `package@version`, or a local path. For local
-paths, run `scripts/assess-project.py <path>` first to detect ecosystem and
+Identify the target: GitHub repo/ref, an exact package purl or `package@version`
+with `--ecosystem`, an OCI digest, or an explicit local path. Identity resolution
+does not download or scan remote targets. For local directories, run
+`scripts/assess-project.py <path>` first to detect ecosystem and
 existing artifacts.
 
 > Tip: A request like "should we use `left-pad`?" is CONSUME. "Harden our API
@@ -52,7 +55,7 @@ help the user. An unavailable probe remains a gap, never a clean finding.
 | Supply chain | SBOM (SPDX) + transitive risk | `references/sbom/` |
 | Provenance & signing | SLSA level + Cosign/Sigstore verify | `references/slsa/`, `references/signing/` |
 | Secrets | Gitleaks / TruffleHog | `references/secrets-scanning/` |
-| Baseline | OSPS Baseline L1 conformance | `references/osps-baseline/` |
+| Baseline (unweighted) | Versioned OSPS requirement-level conformance | `references/osps-baseline/` |
 | Maintenance | release cadence, bus factor, CVE backlog, EOL | repo metadata |
 | Threat coverage *(PRODUCE)* | STRIDE threat model | `references/threat-modeling/` |
 | Code review *(PRODUCE)* | branch protection + review signal | `references/code-review/` |
@@ -81,7 +84,7 @@ Rules:
 
 The runner accepts `--evidence observations.json` with a versioned, target-bound
 object. Use it for supported placeholder probes (`supply_chain`, `provenance`,
-`baseline`, `threat_coverage`, `code_review`), not to assert an unverified live
+`threat_coverage`, `code_review`), not to assert an unverified live
 secret. For example:
 
 ```json
@@ -90,10 +93,10 @@ secret. For example:
   "target": "./project",
   "mode": "produce",
   "observations": [{
-    "name": "baseline",
+    "name": "threat_coverage",
     "evidence_type": "manual_observation",
-    "facts": {"controls_met": 3, "controls_total": 4, "catalog_version": "v2026.08.28"},
-    "source": "reviewed checklist",
+    "facts": {"coverage": "partial"},
+    "source": "reviewed threat model",
     "captured_at": "2026-11-09T12:00:00Z",
     "tool": {"name": "manual", "version": "1"}
   }]
@@ -125,6 +128,82 @@ no scanner calls or target filesystem checks, and retains captured actions
 When manual branch-review evidence is imported alongside local CODEOWNERS,
 the manual observation replaces only the CODEOWNERS proxy; reconciliation
 appears in `evidence_note` and the Markdown report.
+
+### Optional target-bound runtime evidence
+
+These are independent controls, not prerequisites for advice. Paths inside an
+artifact configuration are local and relative to that configuration file.
+No target is cloned, installed, built, pulled, signed, or published.
+
+- `--baseline-evidence baseline.json` validates canonical v2026.08.28 L1-L3
+  requirement observations, including applicability reasons and missing evidence.
+  See the [schema and example](../../references/osps-baseline/level1-checklist.md#optional-structured-conformance-evidence).
+  Policy v2 has **no Baseline risk weight**; other weights retain their relative
+  importance. Old aggregate `controls_met/controls_total` imports must move to
+  requirement-level evidence. Version-1 snapshots are not silently rescored:
+  retain their original report or replay with the matching implementation.
+- `--artifact-evidence artifact.json` checks only the requested local signature,
+  provenance, or SPDX JSON 2.3 input. Results appear as `artifact_evidence`,
+  separate from SLSA-level or vulnerability-risk scores. Expected digests and
+  identities must come from an independently trusted source, not from the
+  untrusted bundle itself. A source SBOM is not a shipped-binary inventory.
+- `--vex-evidence vex.json` retains OpenVEX 0.2.0 statements as vulnerability
+  context. The input cannot grant issuer authentication and does not suppress
+  findings. Source, exact component/product scope, withdrawal status,
+  reachability limitations, and caller-selected freshness remain visible.
+
+An artifact configuration can contain only an SBOM section, only signature
+verification, or any relevant combination. Example for one released file:
+
+```json
+{
+  "schema_version": 1,
+  "target": "./dist/release.bin",
+  "artifact": {
+    "path": "dist/release.bin",
+    "sha256": "<independently expected 64-character SHA-256>"
+  },
+  "signature": {
+    "bundle": "dist/release.bin.sigstore.json",
+    "expected_signer": "<expected certificate identity>",
+    "expected_issuer": "https://token.actions.githubusercontent.com",
+    "trusted_root": "trusted-root.json"
+  },
+  "sbom": {
+    "path": "release.spdx.json",
+    "scope": "build_output",
+    "subject_sha256": "<same independently expected SHA-256>"
+  }
+}
+```
+
+Replace placeholders with reviewed values. Artifact paths must match a local
+file target or remain inside a local directory target. Supported SBOM scopes
+are `source_checkout`, `build_output`, and `oci_image`; released-subject
+binding currently requires a local artifact and its expected digest.
+Declared checksums do not independently authenticate the SBOM.
+
+Optional `provenance` fields are `path`, `expected_source_uri`
+(`github.com/owner/repo`), `expected_builder_id`, exactly one of
+`expected_source_tag` or `expected_source_branch`, and optional
+`expected_source_commit`. This path calls `slsa-verifier` and checks its
+verified SLSA v1 statement, not an arbitrary unverified JSON document.
+Public verifier trust lookup requires explicit `--allow-network-trust`;
+Cosign may instead use an independently supplied trusted root.
+Missing tools or trust material remain gaps, not successful verification.
+These paths never certify a SLSA Build or Source level.
+
+A VEX configuration contains `schema_version: 1`, the exact `target`,
+`documents` (OpenVEX JSON objects), optional `trusted_authors` (a policy
+allowlist, not proof of authorship), and optional `max_age_days`. If no
+freshness policy is supplied, freshness remains unknown. The runner does not
+authenticate imported documents or silently promote a declared author.
+
+Evidence and snapshot files can reveal component inventories and private
+project context; store them appropriately. Replay reuses captured observations
+without re-verifying signatures, network data, or references. Supplemental
+configuration files are limited to 1 MB; snapshots are limited to 32 MiB on
+both write and replay.
 
 ### Step 3 — Fuse signals into a weighted verdict
 Apply **`ensemble/risk-model.md`** exactly:

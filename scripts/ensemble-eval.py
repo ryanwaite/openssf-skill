@@ -38,33 +38,35 @@ from typing import Any, Dict, List, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from target_identity import resolve_target
+from baseline_conformance import evaluate_conformance, load_evidence as load_baseline
+from supplemental_evidence import artifact_evidence, read_document, vex_context
+from vulnerability_evidence import triage_osv_package
 
 # --- Risk model constants (mirror ensemble/risk-model.md) --------------------
 
 MODE_WEIGHTS: Dict[str, Dict[str, float]] = {
     "consume": {
-        "known_vulns": 0.28,
-        "maintenance": 0.22,
-        "supply_chain": 0.16,
-        "scorecard": 0.14,
-        "provenance": 0.12,
-        "baseline": 0.08,
+        "known_vulns": 0.28 / 0.92,
+        "maintenance": 0.22 / 0.92,
+        "supply_chain": 0.16 / 0.92,
+        "scorecard": 0.14 / 0.92,
+        "provenance": 0.12 / 0.92,
     },
     "produce": {
-        "secrets": 0.20,
-        "provenance": 0.16,
-        "code_review": 0.16,
-        "scorecard": 0.14,
-        "known_vulns": 0.12,
-        "threat_coverage": 0.12,
-        "baseline": 0.10,
+        "secrets": 0.20 / 0.90,
+        "provenance": 0.16 / 0.90,
+        "code_review": 0.16 / 0.90,
+        "scorecard": 0.14 / 0.90,
+        "known_vulns": 0.12 / 0.90,
+        "threat_coverage": 0.12 / 0.90,
     },
 }
 
 SEVERITY_DEDUCTION = {"CRITICAL": 40, "HIGH": 20, "MEDIUM": 8, "LOW": 2,
                       "NONE": 0}
 SCHEMA_VERSION = 1
-POLICY_VERSION = "1"
+POLICY_VERSION = "2"
+MAX_SNAPSHOT_BYTES = 32 * 1024 * 1024
 
 
 # --- Signal helper -----------------------------------------------------------
@@ -316,13 +318,18 @@ def _severity(vuln: Dict[str, Any]) -> tuple:
             max(base_scores, default=None), "known" if buckets else "missing")
 
 
-def _affected_ranges(vuln: Dict[str, Any]) -> List[Dict[str, Any]]:
+def _affected_ranges(vuln: Dict[str, Any], package: Dict[str, Any]) -> List[Dict[str, Any]]:
     ranges_out = []
     affected_list = vuln.get("affected", [])
     if not isinstance(affected_list, list):
         raise ValueError("Invalid affected list")
     for affected in affected_list:
         if not isinstance(affected, dict):
+            raise ValueError("Invalid affected entry")
+        identity = affected.get("package")
+        if not isinstance(identity, dict):
+            raise ValueError("Missing affected package identity")
+        if any(identity.get(key) != package[key] for key in ("ecosystem", "name")):
             continue
         ranges = affected.get("ranges", [])
         if not isinstance(ranges, list):
@@ -348,7 +355,8 @@ def _affected_ranges(vuln: Dict[str, Any]) -> List[Dict[str, Any]]:
     return ranges_out
 
 
-def _osv_findings(data: Dict[str, Any]) -> List[Dict[str, Any]]:
+def _osv_findings(data: Dict[str, Any], context: Optional[Dict[str, Any]] = None,
+                  triage: Optional[List[Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
     """Collapse overlapping aliases/groups per package version across sources."""
     records: Dict[tuple, List[Dict[str, Any]]] = {}
     for result in data["results"]:
@@ -365,6 +373,11 @@ def _osv_findings(data: Dict[str, Any]) -> List[Dict[str, Any]]:
             if not all(isinstance(pkg.get(k), str) and pkg[k]
                        for k in ("name", "version", "ecosystem")):
                 raise ValueError("Missing package identity")
+            package_triage = triage_osv_package(pkg, entry["vulnerabilities"], **(context or {}))
+            scoped_records = {record["id"]: record for finding in package_triage["findings"]
+                              for record in finding["records"]}
+            if triage is not None:
+                triage.append(package_triage)
             groups = entry.get("groups", [])
             if not isinstance(groups, list):
                 raise ValueError("Invalid groups")
@@ -385,8 +398,10 @@ def _osv_findings(data: Dict[str, Any]) -> List[Dict[str, Any]]:
                 for group in group_ids:
                     if ids & group:
                         ids.update(group)
+                if vuln.get("withdrawn"):
+                    continue
                 severity, base_score, severity_status = _severity(vuln)
-                affected = _affected_ranges(vuln)
+                affected = _affected_ranges({"affected": scoped_records[vuln["id"]]["affected"]}, pkg)
                 fixes = [event["fixed"] for item in affected for event in item["events"]
                          if "fixed" in event]
                 matching = [r for r in bucket if ids & set(r["aliases"])]
@@ -419,7 +434,8 @@ def _osv_findings(data: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 def probe_known_vulns(target: str, is_local: bool,
-                      identity: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                      identity: Optional[Dict[str, Any]] = None,
+                      context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     if not is_local:
         return signal("known_vulns", "unknown", None, "low",
                       "OSV source scan needs a local directory or lockfile/SPDX file. "
@@ -447,12 +463,15 @@ def probe_known_vulns(target: str, is_local: bool,
         data = json.loads(proc.stdout)
         if not isinstance(data, dict) or not isinstance(data.get("results"), list):
             raise ValueError("Missing results")
-        findings = _osv_findings(data)
+        triage = []
+        findings = _osv_findings(data, context, triage)
         if not any(result["packages"] for result in data["results"]):
             return signal("known_vulns", "unknown", None, "low",
                           "OSV-Scanner reported no scanned package sources; coverage unknown.",
                           source="OSV-Scanner")
-        if (proc.returncode == 0 and findings) or (proc.returncode == 1 and not findings):
+        reported = any(entry["vulnerabilities"] for result in data["results"]
+                       for entry in result["packages"])
+        if (proc.returncode == 0 and reported) or (proc.returncode == 1 and not reported):
             raise ValueError("Exit/output mismatch")
         for finding in findings:
             if finding["severity"] and finding["severity_status"] == "known":
@@ -477,7 +496,7 @@ def probe_known_vulns(target: str, is_local: bool,
                      "`cvss==3.6` calculates supported vectors, while malformed "
                      "or missing data needs manual review." if unknown else
                      "Severity and fix data from OSV-Scanner."),
-                  raw={"counts": counts, "findings": findings},
+                  raw={"counts": counts, "findings": findings, "triage": triage},
                   source="OSV-Scanner", tool={"name": "osv-scanner", "version": "unrecorded"})
 
 
@@ -581,11 +600,6 @@ def probe_provenance(target: str) -> Dict[str, Any]:
     return _placeholder("provenance",
                         "Check SLSA level and verify signatures with "
                         "`cosign verify`; import the observed level with --evidence.")
-
-
-def probe_baseline(target: str) -> Dict[str, Any]:
-    return _placeholder("baseline",
-                        "Assess versioned OSPS Baseline controls; import met / total with --evidence.")
 
 
 def probe_threat_coverage(target: str) -> Dict[str, Any]:
@@ -741,6 +755,8 @@ def _confidence(signals: List[Dict[str, Any]], complete: bool) -> str:
 # --- Orchestration -----------------------------------------------------------
 
 def _utc(value: str) -> datetime:
+    if not isinstance(value, str):
+        raise ValueError("Expected an ISO-8601 timestamp with timezone")
     try:
         date = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except (ValueError, TypeError) as exc:
@@ -758,6 +774,9 @@ def _nonnegative(value: Any) -> int:
 
 def _manual_signal(item: Dict[str, Any]) -> Dict[str, Any]:
     name = item["name"]
+    if name == "baseline":
+        raise ValueError("Baseline is separate from policy v2; use --baseline-evidence "
+                         "with requirement-level conformance observations")
     facts = item["facts"]
     if not isinstance(facts, dict) or item["evidence_type"] not in (
             "manual_observation", "self_report"):
@@ -766,7 +785,6 @@ def _manual_signal(item: Dict[str, Any]) -> Dict[str, Any]:
         "supply_chain": {"direct_high_critical", "transitive_high_critical",
                          "pinned_lockfile"},
         "provenance": {"slsa_level"},
-        "baseline": {"controls_met", "controls_total", "catalog_version"},
         "threat_coverage": {"coverage"},
         "code_review": {"required_reviews", "protected_default_branch"},
     }
@@ -793,13 +811,6 @@ def _manual_signal(item: Dict[str, Any]) -> Dict[str, Any]:
             raise ValueError("slsa_level must be 0..3")
         score = {0: 10, 1: 40, 2: 70, 3: 100}[level]
         finding = f"Reported SLSA level {level}; artifact verification not performed by evaluator."
-    elif name == "baseline":
-        met, total = _nonnegative(facts["controls_met"]), _nonnegative(facts["controls_total"])
-        if total == 0 or met > total or not isinstance(facts.get("catalog_version"), str) \
-                or not facts["catalog_version"]:
-            raise ValueError("Baseline needs catalog_version and 0 <= met <= total > 0")
-        score = round(100 * met / total, 1)
-        finding = f"{met}/{total} controls met for catalog {facts['catalog_version']} (custom heuristic)."
     elif name == "threat_coverage":
         coverage = facts["coverage"]
         if coverage not in ("current", "partial", "none"):
@@ -896,7 +907,11 @@ def _report(target: str, mode: str, signals: List[Dict[str, Any]],
 
 def evaluate(target: str, mode: str, evidence: Optional[Path] = None,
              evaluated_at: Optional[str] = None,
-             ecosystem: Optional[str] = None) -> Dict[str, Any]:
+             ecosystem: Optional[str] = None, *,
+             baseline_evidence: Optional[Path] = None,
+             artifact_input: Optional[Path] = None,
+             vex_input: Optional[Path] = None,
+             allow_network_trust: bool = False) -> Dict[str, Any]:
     evaluated_at = evaluated_at or datetime.now(timezone.utc).isoformat()
     _utc(evaluated_at)
     identity = resolve_target(target, ecosystem)
@@ -904,12 +919,13 @@ def evaluate(target: str, mode: str, evidence: Optional[Path] = None,
     is_local = identity["kind"] in ("local_directory", "local_file")
     is_dir = identity["kind"] == "local_directory"
     scan_path = identity.get("path", target)
+    context = vex_context(vex_input, target) if vex_input else {}
+    context["as_of"] = evaluated_at
 
     signals = [
         probe_scorecard(target, is_repo, identity, mode, evaluated_at),
-        probe_known_vulns(scan_path, is_local, identity),
+        probe_known_vulns(scan_path, is_local, identity, context),
         probe_provenance(target),
-        probe_baseline(target),
     ]
     if mode == "consume":
         if is_dir or is_repo:
@@ -966,11 +982,53 @@ def evaluate(target: str, mode: str, evidence: Optional[Path] = None,
                              else "not applicable"}
         elif s["status"] == "ok" and s["tool"]["version"] == "unrecorded":
             s["tool"]["version"] = _tool_version(s["tool"]["name"])
-    return _report(target, mode, signals, evaluated_at, identity["kind"], identity)
+    supplemental = artifact_evidence(
+        artifact_input, target, identity, allow_network_trust=allow_network_trust
+    ) if artifact_input else {}
+    for s in signals:
+        controls = (("signature", "provenance") if s["name"] == "provenance"
+                    else ("sbom",) if s["name"] == "supply_chain" else ())
+        observed = {key: supplemental[key] for key in controls if key in supplemental}
+        if not observed:
+            continue
+        s["related_evidence"] = observed
+        if any(result["status"] == "error" for result in observed.values()):
+            s.update(status="error", subscore=None, confidence="low",
+                     finding="Supplied artifact evidence failed verification; review its reported gaps.")
+        elif s["status"] != "ok":
+            s["finding"] = ("Artifact observations are available separately; verification "
+                            "does not establish a SLSA level or complete transitive vulnerability coverage.")
+    report = _report(target, mode, signals, evaluated_at, identity["kind"], identity)
+    if supplemental:
+        report["artifact_evidence"] = supplemental
+        failures = [key for key, result in supplemental.items() if result["status"] == "error"]
+        report["actions"] = [
+            f"Investigate the {key} evidence mismatch before relying on this artifact."
+            for key in failures
+        ] + report["actions"]
+    if baseline_evidence:
+        expected = identity.get("git_commit") if identity.get("git_dirty") is False else \
+            identity.get("commit") if identity["kind"] == "repo" else \
+            identity.get("identifier") if identity["kind"] == "local_file" else None
+        report["baseline_conformance"] = evaluate_conformance(
+            load_baseline(baseline_evidence), target, evaluated_at=evaluated_at,
+            expected_revision=expected,
+        )
+    if vex_input:
+        report["vex_input"] = {
+            "documents_supplied": len(context["vex_documents"]),
+            "authors_authenticated": False,
+            "limitation": "Imported statements are context only; no automatic finding suppression.",
+        }
+    return report
 
 
 def replay(snapshot: Path, evaluated_at: Optional[str] = None) -> Dict[str, Any]:
-    data = json.loads(snapshot.read_text(encoding="utf-8"))
+    data = read_document(snapshot, MAX_SNAPSHOT_BYTES)
+    if isinstance(data, dict) and data.get("policy_version") != POLICY_VERSION:
+        raise ValueError("Snapshot policy differs from policy v2 (Baseline is now unweighted). "
+                         "Retain the original report or replay with its original policy version; "
+                         "run a new evaluation for policy v2.")
     if not isinstance(data, dict) or data.get("schema_version") != SCHEMA_VERSION \
             or data.get("policy_version") != POLICY_VERSION \
             or data.get("mode") not in MODE_WEIGHTS or not isinstance(data.get("target"), str) \
@@ -991,6 +1049,11 @@ def replay(snapshot: Path, evaluated_at: Optional[str] = None) -> Dict[str, Any]
             isinstance(action, str) for action in data["actions"]):
         raise ValueError("Snapshot actions missing")
     report["actions"] = data["actions"]
+    for name in ("artifact_evidence", "baseline_conformance", "vex_input"):
+        if name in data:
+            if not isinstance(data[name], dict):
+                raise ValueError("Invalid supplemental snapshot evidence")
+            report[name] = data[name]
     return report
 
 
@@ -1119,6 +1182,38 @@ def to_markdown(report: Dict[str, Any]) -> str:
                  for i, r in enumerate(risks, 1))
     if not risks:
         lines.append("No ranked findings in the available evidence; this is not a clean bill of health.")
+    known = next((s for s in report["signals"] if s["name"] == "known_vulns"), None)
+    if known and isinstance(known.get("raw"), dict) and known["raw"].get("triage"):
+        lines += ["", "## Vulnerability context (not automatic exclusions)", ""]
+        for package in known["raw"]["triage"]:
+            for finding in package["findings"]:
+                lines.append(f"- **{_md(finding['id'])}:** {_md(finding['version_status'])} "
+                             f"for {_md(package['package']['name'])}@{_md(package['package']['version'])}.")
+                for record in finding["records"]:
+                    if record["malicious"]["report"]:
+                        lines.append(f"  Malicious-package report: {_md(record['malicious']['recommendation'])}; "
+                                     "report identity alone is not proof of compromise.")
+                for context in finding["vex"]:
+                    lines.append(f"  VEX: {_md(context['status'])}; {_md(context['assessment'])}; "
+                                 f"scope {_md(context['scope'])}; freshness {_md(context['freshness'])}; "
+                                 f"authenticated author: {_md(context['authenticated'])}.")
+    if report.get("artifact_evidence"):
+        lines += ["", "## Artifact evidence (separate observations)", ""]
+        for name, result in report["artifact_evidence"].items():
+            lines.append(f"- **{_md(name)}:** {_md(result['status'])}. "
+                         + " ".join(_md(gap) for gap in result["gaps"]))
+        lines.append("Successful signature or provenance verification does not by itself certify a SLSA level. "
+                     "SBOM checksum declarations do not establish inventory completeness.")
+    if report.get("baseline_conformance"):
+        baseline = report["baseline_conformance"]
+        lines += ["", "## OSPS Baseline conformance (not weighted)", "",
+                  f"Catalog {_md(baseline['catalog_version'])}; level {_md(baseline['level'])}; "
+                  f"scope {_md(baseline['scope'])}; revision {_md(baseline['revision'])}.",
+                  f"**{_md(baseline['outcome'])}**: "
+                  + ", ".join(f"{_md(name)}={count}" for name, count in baseline["counts"].items()),
+                  "Supplied observations are not independently verified or a certification."]
+        lines.extend(f"- **{_md(row['requirement_id'])}:** {_md(row['status'])}; {_md(row['reason'])}"
+                     for row in baseline["requirements"] if row["evidence_type"] != "not_observed")
     lines += ["", "## Required actions", ""]
     lines.extend(f"- [ ] {_md(action)}" for action in report["actions"])
     if not report["actions"]:
@@ -1152,16 +1247,34 @@ def main():
                     help="required for package@version targets without a purl")
     ap.add_argument("--format", choices=["json", "md"], default="json")
     ap.add_argument("--evidence", type=Path, help="import versioned, target-bound manual observations")
+    ap.add_argument("--baseline-evidence", type=Path,
+                    help="optional requirement-level Baseline conformance (not scored)")
+    ap.add_argument("--artifact-evidence", type=Path,
+                    help="optional local signature/provenance/SPDX evidence configuration")
+    ap.add_argument("--vex-evidence", type=Path,
+                    help="optional OpenVEX context; no automatic suppression or authentication")
+    ap.add_argument("--allow-network-trust", action="store_true",
+                    help="explicitly allow artifact verifiers' public trust lookup")
     ap.add_argument("--snapshot-out", type=Path, help="write sanitized replayable JSON")
     ap.add_argument("--at", help="ISO-8601 evaluation time (UTC offset required)")
     args = ap.parse_args()
-    if bool(args.target) != bool(args.mode) or args.replay and (args.evidence or args.ecosystem):
-        ap.error("--target requires --mode; --evidence/--ecosystem cannot be used with --replay")
+    if bool(args.target) != bool(args.mode) or args.replay and (
+            args.evidence or args.ecosystem or args.baseline_evidence or
+            args.artifact_evidence or args.vex_evidence or args.allow_network_trust):
+        ap.error("--target requires --mode; new evidence/options cannot be used with --replay")
+    if args.allow_network_trust and not args.artifact_evidence:
+        ap.error("--allow-network-trust requires --artifact-evidence")
     try:
         report = (replay(args.replay, args.at) if args.replay else
-                  evaluate(args.target, args.mode, args.evidence, args.at, args.ecosystem))
+                  evaluate(args.target, args.mode, args.evidence, args.at, args.ecosystem,
+                           baseline_evidence=args.baseline_evidence,
+                           artifact_input=args.artifact_evidence, vex_input=args.vex_evidence,
+                           allow_network_trust=args.allow_network_trust))
         if args.snapshot_out:
-            args.snapshot_out.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+            snapshot = (json.dumps(report, indent=2) + "\n").encode("utf-8")
+            if len(snapshot) > MAX_SNAPSHOT_BYTES:
+                raise ValueError("Snapshot exceeds the 32 MiB replay limit; reduce the evidence scope")
+            args.snapshot_out.write_bytes(snapshot)
     except (OSError, ValueError, KeyError, TypeError) as exc:
         ap.error(str(exc) if isinstance(exc, ValueError) else
                  f"Evidence validation or output failed ({type(exc).__name__}); "

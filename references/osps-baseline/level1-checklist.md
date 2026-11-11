@@ -109,5 +109,7 @@ python3 <installed-skill>/scripts/baseline_conformance.py \
 `--revision` checks the claimed revision against an expected identity when you
 know it. `--at` accepts a timezone-qualified evaluation timestamp for reproducible
 age calculations. No freshness threshold is silently selected. This separate
-conformance report does not alter the ensemble's legacy weighted Baseline
-heuristic; changing that custom policy is a separate decision.
+conformance report is also available through the ensemble's
+`--baseline-evidence baseline.json` option. Under custom risk policy v2,
+Baseline has no numeric weight: its conformance evidence is separate from
+the ensemble risk score.
