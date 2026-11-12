@@ -64,6 +64,11 @@ class TestTargetIdentity(unittest.TestCase):
         self.assertFalse(pkg["immutable"])
         purl = resolve_target("pkg:npm/%40scope/name@1.2.3")
         self.assertEqual(purl["identifier"], pkg["identifier"])
+        maven = resolve_target("pkg:maven/example.group/library@1.2.3")
+        self.assertEqual(maven["name"], "example.group:library")
+        self.assertEqual(maven["purl"], "pkg:maven/example.group/library@1.2.3")
+        self.assertEqual(resolve_target("example.group:library@1.2.3", "Maven")["purl"],
+                         maven["purl"])
         image = resolve_target("registry.example/app@sha256:" + "f" * 64)
         self.assertEqual(image["kind"], "image")
         self.assertTrue(image["immutable"])

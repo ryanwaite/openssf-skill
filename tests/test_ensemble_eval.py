@@ -1,14 +1,20 @@
 """Scanner, evidence, and fusion regression tests for the ensemble evaluator."""
 
 import importlib.util
+from contextlib import redirect_stdout
+from io import BytesIO, StringIO
 import json
 import os
 import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+import remote_acquisition as ra
 
 _SPEC = importlib.util.spec_from_file_location(
     "ensemble_eval", Path(__file__).resolve().parent.parent / "scripts" / "ensemble-eval.py"
@@ -123,6 +129,37 @@ class TestAdapters(unittest.TestCase):
                     result = ee.probe_known_vulns(".", True)
                     self.assertNotEqual(result["status"], "ok")
                     self.assertIsNone(result["subscore"])
+
+    def test_scanner_all_packages_clean_shape_requires_valid_package_identity(self):
+        data = {"results": [{"source": {"path": "requirements.txt", "type": "lockfile"},
+                             "packages": [{"package": {"name": "requests",
+                                                       "version": "2.32.0",
+                                                       "ecosystem": "PyPI",
+                                                       "purl": "pkg:pypi/requests@2.32.0"}}]}],
+                "experimental_config": {"licenses": {"summary": False, "allowlist": None}}}
+        with patch.object(ee, "_have", return_value=True), \
+                patch.object(ee, "_run", return_value=process(0, json.dumps(data))) as run:
+            clean = ee.probe_known_vulns("requirements.txt", True)
+        self.assertEqual(clean["status"], "ok")
+        self.assertEqual(clean["subscore"], 100)
+        self.assertEqual(clean["raw"]["triage"][0]["package"]["version"], "2.32.0")
+        self.assertIn("--all-packages", run.call_args.args[0])
+        self.assertIn("--all-vulns", run.call_args.args[0])
+        data["results"][0]["packages"][0]["groups"] = [{"ids": ["CVE-123"]}]
+        with patch.object(ee, "_have", return_value=True), \
+                patch.object(ee, "_run", return_value=process(0, json.dumps(data))):
+            self.assertEqual(ee.probe_known_vulns("requirements.txt", True)["status"],
+                             "error")
+        data["results"][0]["packages"][0].pop("groups")
+        del data["results"][0]["packages"][0]["package"]["version"]
+        with patch.object(ee, "_have", return_value=True), \
+                patch.object(ee, "_run", return_value=process(0, json.dumps(data))):
+            self.assertEqual(ee.probe_known_vulns("requirements.txt", True)["status"],
+                             "error")
+        with patch.object(ee, "_have", return_value=True), \
+                patch.object(ee, "_run", return_value=process(0, '{"results":[]}')):
+            self.assertEqual(ee.probe_known_vulns("requirements.txt", True)["status"],
+                             "unknown")
 
     def test_scorecard_missing_or_out_of_range_aggregate_not_observed(self):
         with patch.object(ee, "_have", return_value=True):
@@ -418,6 +455,253 @@ class TestAdapters(unittest.TestCase):
             result = ee.probe_known_vulns("requests@2.31.0", False)
         self.assertEqual(result["status"], "unknown")
         run.assert_not_called()
+
+    def test_explicit_package_query_pagination_triage_and_cli_replay(self):
+        fixed = {"id": "MAL-123", "aliases": ["GHSA-xyz"],
+                 "database_specific": {"severity": "CRITICAL"},
+                 "affected": [{"package": {"ecosystem": "npm", "name": "@scope/name"},
+                               "ranges": [{"type": "SEMVER", "events": [
+                                   {"introduced": "0"}, {"fixed": "2.0"}]}]}]}
+        withdrawn = {"id": "CVE-123", "withdrawn": AT,
+                     "affected": [{"package": {"ecosystem": "npm", "name": "@scope/name"},
+                                   "versions": ["1.0"]}]}
+        responses = [json.dumps({"vulns": [fixed], "next_page_token": "next"}).encode(),
+                     json.dumps({"vulns": [withdrawn]}).encode()]
+        calls = []
+
+        def fake_read(url, *, payload=None, limit=ra.MAX_RESPONSE):
+            self.assertEqual(url, "https://api.osv.dev/v1/query")
+            calls.append(json.loads(payload))
+            return responses.pop(0)
+
+        with patch.object(ra, "_read", side_effect=fake_read), \
+                patch.object(ee, "_have", return_value=False), \
+                patch.object(sys, "argv", ["ensemble-eval.py", "--target",
+                                            "@scope/name@1.0", "--ecosystem", "npm",
+                                            "--mode", "consume", "--at", AT,
+                                            "--acquire-remote"]), \
+                redirect_stdout(StringIO()) as output:
+            ee.main()
+        report = json.loads(output.getvalue())
+        self.assertEqual(calls[0], {"package": {"ecosystem": "npm",
+                                                "name": "@scope/name"}, "version": "1.0"})
+        self.assertEqual(calls[1]["page_token"], "next")
+        known = next(s for s in report["signals"] if s["name"] == "known_vulns")
+        self.assertEqual(known["raw"]["findings"][0]["fixed_versions"], ["2.0"])
+        self.assertEqual(known["raw"]["findings"][0]["paths"], ["pkg:npm/%40scope/name@1.0"])
+        self.assertEqual(known["raw"]["triage"][0]["findings"][0]["version_status"], "withdrawn")
+        self.assertTrue(any(record["malicious"]["report"] for finding in
+                            known["raw"]["triage"][0]["findings"]
+                            for record in finding["records"]))
+        self.assertEqual(report["remote_acquisition"]["pages"], 2)
+        self.assertIn("advisory lookup only", report["remote_acquisition"]["scope"])
+        self.assertEqual(report["target_identity"]["identifier"], "npm:@scope/name@1.0")
+        with tempfile.TemporaryDirectory() as directory:
+            snapshot = Path(directory) / "snapshot.json"
+            snapshot.write_text(json.dumps(report))
+            self.assertEqual(ee.replay(snapshot)["remote_acquisition"],
+                             report["remote_acquisition"])
+
+    def test_pypi_empty_query_and_query_errors_do_not_fabricate_coverage(self):
+        identity = ee.resolve_target("requests@2.31.0", "PyPI")
+        with patch.object(ra, "_read", return_value=b'{"vulns":[]}'):
+            report = ee.evaluate(identity["requested"], "consume", ecosystem="PyPI",
+                                 evaluated_at=AT, acquire_remote=True)
+        known = next(s for s in report["signals"] if s["name"] == "known_vulns")
+        self.assertEqual(known["status"], "ok")
+        self.assertEqual(known["raw"]["triage"][0]["package"]["ecosystem"], "PyPI")
+        self.assertIn("malicious-code absence", known["finding"])
+        self.assertEqual(report["remote_acquisition"]["advisories"], 0)
+        for response in (b'{"vulns":{}}',
+                         b'{"vulns":[],"next_page_token":"x"}'):
+            with self.subTest(response=response), \
+                    patch.object(ra, "_read", side_effect=[response] * ra.MAX_PAGES):
+                result = ee.evaluate(identity["requested"], "consume", ecosystem="PyPI",
+                                     evaluated_at=AT, acquire_remote=True)
+            known = next(s for s in result["signals"] if s["name"] == "known_vulns")
+            self.assertEqual(known["status"], "error")
+            self.assertIsNone(known["subscore"])
+
+    def test_image_digest_preflight_and_explicit_invocation(self):
+        identity = ee.resolve_target("ghcr.io/example/app@sha256:" + "f" * 64)
+        with patch.object(ee, "_have", return_value=False), \
+                patch.object(ee, "_run_remote") as run:
+            missing = ee.evaluate(identity["requested"], "consume",
+                                  evaluated_at=AT, acquire_remote=True)
+        self.assertEqual(next(s for s in missing["signals"] if
+                              s["name"] == "known_vulns")["status"], "unknown")
+        run.assert_not_called()
+        data = {"results": [{"source": {"path": "os:var/lib/dpkg/status"},
+                             "packages": [{"package": {"ecosystem": "Debian:12",
+                                                       "name": "example", "version": "1"},
+                                           "vulnerabilities": []}]}]}
+
+        def preflight(cmd, timeout=180):
+            return process(0, "image scan supported") if cmd[:3] == [
+                "osv-scanner", "scan", "image"] else process(0, "running")
+
+        with patch.object(ee, "_have", return_value=True), \
+                patch.object(ee, "_run", side_effect=preflight), \
+                patch.object(ee, "_run_remote",
+                             return_value=process(0, json.dumps(data))) as run:
+            report = ee.evaluate(identity["requested"], "consume", evaluated_at=AT,
+                                 acquire_remote=True)
+        self.assertEqual(next(s for s in report["signals"] if
+                              s["name"] == "known_vulns")["status"], "ok")
+        self.assertEqual(run.call_args.args[0][-1], identity["identifier"])
+        self.assertIn("--no-call-analysis=go", run.call_args.args[0])
+        self.assertIn("--no-resolve", run.call_args.args[0])
+        with patch.object(ee, "_have", return_value=True), \
+                patch.object(ee, "_run_remote") as run:
+            unsupported = ee.evaluate("registry.example/app@sha256:" + "e" * 64,
+                                      "consume", evaluated_at=AT, acquire_remote=True)
+        self.assertEqual(next(s for s in unsupported["signals"] if
+                              s["name"] == "known_vulns")["status"], "error")
+        run.assert_not_called()
+
+    def test_remote_repo_commit_archive_scoped_paths_and_cleanup(self):
+        commit = "a" * 40
+        tar = BytesIO()
+        with tarfile.open(fileobj=tar, mode="w:gz") as archive:
+            contents = b'{"lockfileVersion":3}'
+            directory = tarfile.TarInfo("repo-" + commit + "/nested/")
+            directory.type = tarfile.DIRTYPE
+            archive.addfile(directory)
+            item = tarfile.TarInfo("repo-" + commit + "/nested/package-lock.json")
+            item.size = len(contents)
+            archive.addfile(item, BytesIO(contents))
+        seen = []
+
+        def scan(cmd, **kwargs):
+            source = Path(cmd[-1])
+            seen.append(source)
+            self.assertTrue((source / "nested/package-lock.json").is_file())
+            self.assertIn("--no-resolve", cmd)
+            self.assertIn("--no-ignore", cmd)
+            self.assertTrue(any(arg.startswith("--config=") for arg in cmd))
+            result = {"results": [{"source": {"path": str(source / "nested/package-lock.json")},
+                                   "packages": [{"package": {"ecosystem": "npm",
+                                                             "name": "demo", "version": "1"},
+                                                 "vulnerabilities": [{"id": "GHSA-123",
+                                                                     "database_specific": {
+                                                                         "severity": "HIGH"}}]}]}]}
+            return process(1, json.dumps(result))
+
+        def fetch(url, *, payload=None, limit=ra.MAX_RESPONSE):
+            self.assertEqual(url, f"https://codeload.github.com/example/repo/tar.gz/{commit}")
+            self.assertLessEqual(len(tar.getvalue()), limit)
+            return tar.getvalue()
+
+        with patch.object(ra, "_json", return_value={"sha": commit}), \
+                patch.object(ra, "_read", side_effect=fetch), \
+                patch.object(ee, "_have", return_value=True), \
+                patch.object(ee, "_run_remote", side_effect=scan), \
+                patch.object(ee, "_run", return_value=process(1)):
+            report = ee.evaluate("example/repo@main", "consume", evaluated_at=AT,
+                                 acquire_remote=True)
+        self.assertFalse(seen[0].exists())
+        self.assertEqual(report["target_identity"]["identifier"],
+                         f"github.com/example/repo@{commit}")
+        known = next(s for s in report["signals"] if s["name"] == "known_vulns")
+        self.assertEqual(known["raw"]["findings"][0]["paths"],
+                         ["nested/package-lock.json"])
+        self.assertEqual(known["status"], "ok")
+        self.assertEqual(known["raw"]["triage"][0]["package"]["name"], "demo")
+        self.assertNotIn(str(seen[0]), json.dumps(report))
+        with tempfile.TemporaryDirectory() as directory:
+            snapshot = Path(directory) / "snapshot.json"
+            snapshot.write_text(json.dumps(report))
+            self.assertEqual(ee.replay(snapshot)["target_identity"], report["target_identity"])
+
+    def test_remote_repo_archive_traversal_and_commit_mismatch_are_errors(self):
+        commit = "a" * 40
+        for entry_name, kind in (("repo-" + commit + "/../escape", tarfile.REGTYPE),
+                                 ("repo-" + commit + "/link", tarfile.SYMTYPE)):
+            with self.subTest(entry_name=entry_name):
+                archive_bytes = BytesIO()
+                with tarfile.open(fileobj=archive_bytes, mode="w:gz") as archive:
+                    item = tarfile.TarInfo(entry_name)
+                    item.type = kind
+                    item.size = 0
+                    archive.addfile(item)
+                with patch.object(ra, "_json", return_value={"sha": commit}), \
+                        patch.object(ra, "_read", return_value=archive_bytes.getvalue()), \
+                        patch.object(ee, "_have", return_value=False):
+                    report = ee.evaluate("example/repo@main", "consume",
+                                         evaluated_at=AT, acquire_remote=True)
+                self.assertEqual(report["remote_acquisition"]["status"], "error")
+                self.assertNotIn("commit", report["remote_acquisition"])
+                self.assertEqual(next(s for s in report["signals"] if
+                                      s["name"] == "scorecard")["status"], "unknown")
+        with patch.object(ra, "_json", return_value={"sha": "b" * 40}), \
+                patch.object(ra, "_read") as read:
+            report = ee.evaluate("example/repo@" + commit, "consume", evaluated_at=AT,
+                                 acquire_remote=True)
+        self.assertEqual(report["remote_acquisition"]["status"], "error")
+        read.assert_not_called()
+
+    def test_remote_acquisition_opt_in_and_fixed_https_hosts(self):
+        with patch.object(ra, "_read") as read, \
+                patch.object(ra, "_json") as gh, \
+                patch.object(ee, "_have", return_value=False):
+            report = ee.evaluate("requests@2.31.0", "consume", ecosystem="PyPI",
+                                 evaluated_at=AT)
+            self.assertNotIn("remote_acquisition", report)
+            self.assertEqual(next(s for s in report["signals"] if
+                                  s["name"] == "known_vulns")["status"], "unknown")
+            read.assert_not_called()
+            gh.assert_not_called()
+        for endpoint in ("http://api.osv.dev/v1/query",
+                         "https://127.0.0.1/v1/query",
+                         "https://user:token@api.github.com/repos/example/repo",
+                         "https://api.osv.dev:8443/v1/query"):
+            with self.subTest(endpoint=endpoint), \
+                    self.assertRaises(ra.RemoteAcquisitionError):
+                ra._read(endpoint)
+        with self.assertRaises(ra.RemoteAcquisitionError):
+            ra._NoRedirect().redirect_request(None, None, 302, "redirect", {},
+                                               "http://127.0.0.1")
+
+    def test_remote_scanner_process_is_time_and_output_bounded(self):
+        complete = ee._run_remote([sys.executable, "-c", "print('json')"], timeout=2)
+        self.assertEqual((complete.returncode, complete.stdout.strip()), (0, "json"))
+        timeout = ee._run_remote([sys.executable, "-c", "import time; time.sleep(2)"],
+                                 timeout=0.1)
+        self.assertIsNone(timeout)
+        oversized = ee._run_remote([sys.executable, "-c",
+                                    "import sys; sys.stdout.write('x' * 9000000)"],
+                                   timeout=2)
+        self.assertNotEqual(oversized.returncode, 0)
+
+    def test_archive_duplicate_and_size_limits_clean_up(self):
+        commit = "a" * 40
+        for entries in (
+                [("repo-" + commit + "/file", b"x"),
+                 ("repo-" + commit + "/file", b"y")],
+                [("repo-" + commit + "/file", b"x" * (ra.MAX_FILE + 1))],
+        ):
+            with self.subTest(size=len(entries[-1][1])):
+                archive_bytes = BytesIO()
+                with tarfile.open(fileobj=archive_bytes, mode="w:gz") as archive:
+                    for name, content in entries:
+                        item = tarfile.TarInfo(name)
+                        item.size = len(content)
+                        archive.addfile(item, BytesIO(content))
+                seen = []
+                original_extract = ra._extract
+
+                def observe(raw, path):
+                    seen.append(path)
+                    return original_extract(raw, path)
+
+                identity = ee.resolve_target("example/repo@" + commit)
+                with patch.object(ra, "_json", return_value={"sha": commit}), \
+                        patch.object(ra, "_read", return_value=archive_bytes.getvalue()), \
+                        patch.object(ra, "_extract", side_effect=observe):
+                    with self.assertRaises(ra.RemoteAcquisitionError):
+                        with ra.acquire_repository(identity):
+                            self.fail("Invalid archive was accepted")
+                self.assertFalse(seen[0].exists())
 
     def test_old_gh_push_is_not_reported_as_recent(self):
         with patch.object(ee, "_have", return_value=True), \

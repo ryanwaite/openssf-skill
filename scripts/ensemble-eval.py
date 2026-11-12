@@ -27,9 +27,12 @@ import argparse
 from datetime import datetime, timezone
 import json
 import math
+import os
 import re
+import resource
 import shlex
 import shutil
+import signal as signal_module
 import subprocess
 import sys
 import tempfile
@@ -38,6 +41,7 @@ from typing import Any, Dict, List, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from target_identity import resolve_target
+from remote_acquisition import acquire_repository, query_package, RemoteAcquisitionError
 from baseline_conformance import evaluate_conformance, load_evidence as load_baseline
 from supplemental_evidence import artifact_evidence, read_document, vex_context
 from vulnerability_evidence import triage_osv_package
@@ -113,6 +117,39 @@ def _run(cmd: List[str], timeout: int = 180) -> Optional[subprocess.CompletedPro
         return None
 
 
+def _run_remote(cmd: List[str], *, timeout: int = 120) -> Optional[subprocess.CompletedProcess]:
+    """Bound scanner output and time; never preserve scanner diagnostics or credentials."""
+    limit = 8 * 1024 * 1024
+    with tempfile.TemporaryDirectory(prefix="openssf-scan-") as home:
+        env = {"PATH": os.environ.get("PATH", ""), "HOME": home, "LANG": "C"}
+        env.update({key: os.environ[key] for key in (
+            "HTTPS_PROXY", "https_proxy", "NO_PROXY", "no_proxy",
+            "SSL_CERT_FILE", "SSL_CERT_DIR") if key in os.environ})
+        try:
+            with tempfile.TemporaryFile() as output:
+                proc = subprocess.Popen(
+                    cmd, stdout=output, stderr=subprocess.DEVNULL,
+                    env=env, start_new_session=True,
+                    preexec_fn=lambda: resource.setrlimit(resource.RLIMIT_FSIZE,
+                                                         (limit, limit)))
+                try:
+                    code = proc.wait(timeout=timeout)
+                except subprocess.TimeoutExpired:
+                    try:
+                        os.killpg(proc.pid, signal_module.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    proc.wait()
+                    return None
+                if output.tell() > limit:
+                    return None
+                output.seek(0)
+                return subprocess.CompletedProcess(
+                    cmd, code, output.read(limit).decode("utf-8", errors="replace"), "")
+        except OSError:
+            return None
+
+
 # --- Probes ------------------------------------------------------------------
 # Each probe returns a signal dict. When the underlying tool is unavailable the
 # probe returns an `unknown` signal so the gap is surfaced, never hidden.
@@ -142,7 +179,8 @@ def probe_scorecard(target: str, is_repo: bool, identity: Optional[Dict[str, Any
     if not repo or not _have("scorecard"):
         return signal("scorecard", "unknown", None, "low",
                       "Scorecard not run (needs `scorecard` CLI and a supported GitHub origin).")
-    ref = (identity or {}).get("git_commit") or (identity or {}).get("ref")
+    ref = ((identity or {}).get("git_commit") or (identity or {}).get("commit")
+           or (identity or {}).get("ref"))
     cmd = ["scorecard", f"--repo={repo}", "--format=json"]
     if ref:
         cmd.append(f"--commit={ref}")
@@ -433,52 +471,56 @@ def _osv_findings(data: Dict[str, Any], context: Optional[Dict[str, Any]] = None
                   key=lambda r: (r["ecosystem"], r["package"], r["version"], r["id"]))
 
 
-def probe_known_vulns(target: str, is_local: bool,
-                      identity: Optional[Dict[str, Any]] = None,
-                      context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    if not is_local:
-        return signal("known_vulns", "unknown", None, "low",
-                      "OSV source scan needs a local directory or lockfile/SPDX file. "
-                      "Repository URLs, package coordinates and OCI digests are not acquired or scanned.")
-    if identity and identity["kind"] == "local_file" and identity["file_type"] == "file":
-        return signal("known_vulns", "unknown", None, "low",
-                      "OSV supports recognized lockfiles and SPDX files; this file format is unsupported.")
-    if not _have("osv-scanner"):
-        return signal("known_vulns", "unknown", None, "low",
-                      "OSV-Scanner not installed.")
-    cmd = ["osv-scanner", "scan", "source", "--format=json", "--no-call-analysis=go"]
-    if identity and identity["kind"] == "local_file":
-        if identity["file_type"] == "spdx":
-            cmd.extend(["-L", identity["path"]])
-        else:
-            cmd.append(f"--lockfile=:{identity['path']}")
-    else:
-        cmd.extend(["--recursive", target])
-    proc = _run(cmd)
-    if proc is None or proc.returncode not in (0, 1) or not proc.stdout.strip():
-        return signal("known_vulns", "error", None, "low",
-                      "OSV-Scanner failed or produced no JSON; no clean result inferred.")
+def _osv_signal(data: Dict[str, Any], status_code: int,
+                context: Optional[Dict[str, Any]] = None, *,
+                source: str = "OSV-Scanner",
+                root: Optional[Path] = None,
+                all_packages: bool = False) -> Dict[str, Any]:
     counts = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0, "NONE": 0}
     try:
-        data = json.loads(proc.stdout)
         if not isinstance(data, dict) or not isinstance(data.get("results"), list):
             raise ValueError("Missing results")
+        for result in data["results"]:
+            if not isinstance(result, dict) or not isinstance(result.get("packages"), list):
+                raise ValueError("Missing packages")
+            for entry in result["packages"]:
+                if isinstance(entry, dict) and "vulnerabilities" not in entry and \
+                        all_packages and not entry.get("groups") and \
+                        isinstance(entry.get("package"), dict) and all(
+                            isinstance(entry["package"].get(key), str) and entry["package"][key]
+                            for key in ("ecosystem", "name", "version")):
+                    entry["vulnerabilities"] = []
+        if root:
+            for result in data["results"]:
+                path = result.get("source", {}).get("path")
+                if not isinstance(path, str) or not path:
+                    raise ValueError("Missing source path")
+                candidate = Path(path)
+                if candidate.is_absolute():
+                    try:
+                        candidate = candidate.relative_to(root)
+                    except ValueError as exc:
+                        raise ValueError("Scanner source outside acquired archive") from exc
+                if any(part in ("..", ".") for part in candidate.parts) or \
+                        not candidate.parts or not (root / candidate).is_file():
+                    raise ValueError("Scanner source outside acquired archive")
+                result["source"]["path"] = candidate.as_posix()
         triage = []
         findings = _osv_findings(data, context, triage)
         if not any(result["packages"] for result in data["results"]):
             return signal("known_vulns", "unknown", None, "low",
-                          "OSV-Scanner reported no scanned package sources; coverage unknown.",
-                          source="OSV-Scanner")
+                          f"{source} reported no scanned package sources; coverage unknown.",
+                          source=source)
         reported = any(entry["vulnerabilities"] for result in data["results"]
                        for entry in result["packages"])
-        if (proc.returncode == 0 and reported) or (proc.returncode == 1 and not reported):
+        if (status_code == 0 and reported) or (status_code == 1 and not reported):
             raise ValueError("Exit/output mismatch")
         for finding in findings:
             if finding["severity"] and finding["severity_status"] == "known":
                 counts[finding["severity"]] += 1
-    except (json.JSONDecodeError, TypeError, ValueError, KeyError):
+    except (TypeError, ValueError, KeyError):
         return signal("known_vulns", "error", None, "low",
-                      "OSV-Scanner exit status or JSON structure invalid; no clean result inferred.")
+                      f"{source} output or scope invalid; no clean result inferred.", source=source)
     score = 100
     for sev, n in counts.items():
         score -= sum(SEVERITY_DEDUCTION[sev] *
@@ -495,9 +537,118 @@ def probe_known_vulns(target: str, is_local: bool,
                   + ("verify unknown severities before scoring; optional "
                      "`cvss==3.6` calculates supported vectors, while malformed "
                      "or missing data needs manual review." if unknown else
-                     "Severity and fix data from OSV-Scanner."),
+                     f"Severity and fix data from {source}."),
                   raw={"counts": counts, "findings": findings, "triage": triage},
-                  source="OSV-Scanner", tool={"name": "osv-scanner", "version": "unrecorded"})
+                  source=source, tool={"name": "osv-scanner" if source == "OSV-Scanner"
+                                       else "OSV API", "version": "unrecorded"
+                                       if source == "OSV-Scanner" else "v1"})
+
+
+def probe_known_vulns(target: str, is_local: bool,
+                      identity: Optional[Dict[str, Any]] = None,
+                      context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    if not is_local:
+        return signal("known_vulns", "unknown", None, "low",
+                      "OSV source scan needs a local directory or lockfile/SPDX file. "
+                      "Repository URLs, package coordinates and OCI digests are not acquired or scanned.")
+    if identity and identity["kind"] == "local_file" and identity["file_type"] == "file":
+        return signal("known_vulns", "unknown", None, "low",
+                      "OSV supports recognized lockfiles and SPDX files; this file format is unsupported.")
+    if not _have("osv-scanner"):
+        return signal("known_vulns", "unknown", None, "low",
+                      "OSV-Scanner not installed.")
+    cmd = ["osv-scanner", "scan", "source", "--format=json", "--all-packages",
+           "--all-vulns", "--no-call-analysis=go"]
+    if identity and identity["kind"] == "local_file":
+        if identity["file_type"] == "spdx":
+            cmd.extend(["-L", identity["path"]])
+        else:
+            cmd.append(f"--lockfile=:{identity['path']}")
+    else:
+        cmd.extend(["--recursive", target])
+    proc = _run(cmd)
+    if proc is None or proc.returncode not in (0, 1) or not proc.stdout.strip():
+        return signal("known_vulns", "error", None, "low",
+                      "OSV-Scanner failed or produced no JSON; no clean result inferred.")
+    try:
+        data = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        return signal("known_vulns", "error", None, "low",
+                      "OSV-Scanner exit status or JSON structure invalid; no clean result inferred.")
+    return _osv_signal(data, proc.returncode, context, all_packages=True)
+
+
+def _remote_known_vulns(identity: Dict[str, Any], context: Dict[str, Any],
+                        source: Optional[Path] = None) -> Dict[str, Any]:
+    kind = identity["kind"]
+    if kind == "package":
+        advisories, metadata = query_package(identity)
+        package = {key: identity[key] for key in ("ecosystem", "name", "version", "purl")}
+        data = {"results": [{"source": {"path": identity["purl"]},
+                             "packages": [{"package": package,
+                                           "vulnerabilities": advisories}]}]}
+        result = _osv_signal(data, 1 if advisories else 0, context, source="OSV API")
+        result["acquisition"] = metadata
+        result["confidence"] = "medium" if result["status"] == "ok" else "low"
+        result["finding"] += (" Exact-version advisories only; package contents, malicious-code "
+                              "absence and dependency closure are not verified.")
+        return result
+    if not _have("osv-scanner"):
+        return signal("known_vulns", "unknown", None, "low",
+                      "Install OSV-Scanner v2 for explicit remote source/image scanning.")
+    if kind == "repo":
+        with tempfile.TemporaryDirectory(prefix="openssf-osv-config-") as config_dir:
+            config = Path(config_dir) / "empty.toml"
+            config.write_text("", encoding="utf-8")
+            cmd = ["osv-scanner", "scan", "source", "--format=json",
+                   "--all-packages", "--all-vulns", "--no-call-analysis=go",
+                   "--no-resolve", "--no-ignore",
+                   f"--config={config}", "--recursive", str(source)]
+            proc = _run_remote(cmd)
+    elif kind == "image":
+        image = identity["image"]
+        registry = image.split("/", 1)[0].lower()
+        if registry not in ("ghcr.io", "docker.io") or "/" not in image:
+            return signal("known_vulns", "error", None, "low",
+                          "Image registry unsupported; specify ghcr.io or docker.io explicitly "
+                          "with an exact sha256 digest.")
+        if not _have("docker"):
+            return signal("known_vulns", "unknown", None, "low",
+                          "Image scanning requires an installed, running Docker daemon; "
+                          "start it explicitly or provide a local artifact.")
+        available = _run(["docker", "info", "--format={{.ServerVersion}}"], timeout=10)
+        capability = _run(["osv-scanner", "scan", "image", "--help"], timeout=10)
+        if not available or available.returncode != 0 or not capability or \
+                capability.returncode != 0 or "image" not in capability.stdout.lower():
+            return signal("known_vulns", "unknown", None, "low",
+                          "Docker daemon or OSV-Scanner image subcommand unavailable; "
+                          "do not auto-start Docker.")
+        cmd = ["osv-scanner", "scan", "image", "--format=json",
+               "--all-packages", "--all-vulns", "--no-call-analysis=go",
+               "--no-resolve", identity["identifier"]]
+        proc = _run_remote(cmd)
+    else:
+        raise ValueError("Unsupported remote acquisition target")
+    if proc is None or proc.returncode not in (0, 1) or not proc.stdout.strip():
+        return signal("known_vulns", "error", None, "low",
+                      "Explicit remote OSV scan failed, timed out or exceeded output limit; "
+                      "no clean result inferred.")
+    try:
+        data = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        return signal("known_vulns", "error", None, "low",
+                      "Explicit remote OSV scan returned invalid JSON.")
+    result = _osv_signal(data, proc.returncode, context,
+                         root=source if kind == "repo" else None, all_packages=True)
+    if kind == "image":
+        result["acquisition"] = {
+            "kind": "oci_digest_scan", "registry": registry,
+            "digest": identity["digest"], "reference": identity["identifier"],
+            "fetched_at": datetime.now(timezone.utc).isoformat(),
+            "scope": "OSV-Scanner image package inventory at requested digest; "
+                     "manifest identity not independently attested",
+        }
+    return result
 
 
 def probe_secrets(target: str, is_local: bool) -> Dict[str, Any]:
@@ -911,7 +1062,8 @@ def evaluate(target: str, mode: str, evidence: Optional[Path] = None,
              baseline_evidence: Optional[Path] = None,
              artifact_input: Optional[Path] = None,
              vex_input: Optional[Path] = None,
-             allow_network_trust: bool = False) -> Dict[str, Any]:
+             allow_network_trust: bool = False,
+             acquire_remote: bool = False) -> Dict[str, Any]:
     evaluated_at = evaluated_at or datetime.now(timezone.utc).isoformat()
     _utc(evaluated_at)
     identity = resolve_target(target, ecosystem)
@@ -922,8 +1074,45 @@ def evaluate(target: str, mode: str, evidence: Optional[Path] = None,
     context = vex_context(vex_input, target) if vex_input else {}
     context["as_of"] = evaluated_at
 
+    acquisition = None
+    acquired_signal = None
+    if acquire_remote:
+        if identity["kind"] not in ("repo", "package", "image"):
+            raise ValueError("--acquire-remote requires a GitHub repository, exact package, or OCI digest")
+        try:
+            if identity["kind"] == "repo":
+                with acquire_repository(identity) as (source, acquisition):
+                    identity.update(commit=acquisition["commit"],
+                                    identifier=f"{identity['repo']}@{acquisition['commit']}",
+                                    resolved=True, immutable=True, verified=False)
+                    acquired_signal = _remote_known_vulns(identity, context, source)
+            else:
+                acquired_signal = _remote_known_vulns(identity, context)
+                acquisition = acquired_signal.get("acquisition")
+        except RemoteAcquisitionError as exc:
+            acquisition = {"kind": identity["kind"], "requested": target,
+                           "status": "error", "reason": str(exc),
+                           "scope": "remote acquisition incomplete; no scan inferred"}
+            acquired_signal = signal("known_vulns", "error", None, "low",
+                                     f"Remote acquisition failed: {exc}")
+        if acquisition:
+            acquisition["requested"] = target
+            acquisition["status"] = acquired_signal["status"]
+            acquired_signal["acquisition"] = acquisition
+        elif acquired_signal:
+            acquisition = {"kind": identity["kind"], "requested": target,
+                           "status": acquired_signal["status"],
+                           "scope": "remote acquisition unavailable; no scan inferred"}
+            acquired_signal["acquisition"] = acquisition
+
     signals = [
-        probe_scorecard(target, is_repo, identity, mode, evaluated_at),
+        (signal("scorecard", "unknown", None, "low",
+                "Could not resolve the requested GitHub ref to a verified commit; "
+                "Scorecard default HEAD is not a substitute.")
+         if acquire_remote and is_repo and not identity.get("verified") and not
+         (acquisition and acquisition.get("commit"))
+         else probe_scorecard(target, is_repo, identity, mode, evaluated_at)),
+        acquired_signal if acquired_signal else
         probe_known_vulns(scan_path, is_local, identity, context),
         probe_provenance(target),
     ]
@@ -931,7 +1120,11 @@ def evaluate(target: str, mode: str, evidence: Optional[Path] = None,
         if is_dir or is_repo:
             maintenance_target = identity["path"] if is_dir else \
                 identity["repo"].removeprefix("github.com/")
-            maintenance = probe_maintenance(maintenance_target, is_dir)
+            maintenance = (signal("maintenance", "unknown", None, "low",
+                                  "Acquired commit archive has no git history; "
+                                  "review public repository maintenance separately.")
+                           if acquire_remote and is_repo else
+                           probe_maintenance(maintenance_target, is_dir))
         else:
             maintenance = signal("maintenance", "unknown", None, "low",
                                  "Repository maintenance needs a local checkout or GitHub repo; "
@@ -999,6 +1192,8 @@ def evaluate(target: str, mode: str, evidence: Optional[Path] = None,
             s["finding"] = ("Artifact observations are available separately; verification "
                             "does not establish a SLSA level or complete transitive vulnerability coverage.")
     report = _report(target, mode, signals, evaluated_at, identity["kind"], identity)
+    if acquisition:
+        report["remote_acquisition"] = acquisition
     if supplemental:
         report["artifact_evidence"] = supplemental
         failures = [key for key, result in supplemental.items() if result["status"] == "error"]
@@ -1049,7 +1244,8 @@ def replay(snapshot: Path, evaluated_at: Optional[str] = None) -> Dict[str, Any]
             isinstance(action, str) for action in data["actions"]):
         raise ValueError("Snapshot actions missing")
     report["actions"] = data["actions"]
-    for name in ("artifact_evidence", "baseline_conformance", "vex_input"):
+    for name in ("artifact_evidence", "baseline_conformance", "vex_input",
+                 "remote_acquisition"):
         if name in data:
             if not isinstance(data[name], dict):
                 raise ValueError("Invalid supplemental snapshot evidence")
@@ -1204,6 +1400,14 @@ def to_markdown(report: Dict[str, Any]) -> str:
                          + " ".join(_md(gap) for gap in result["gaps"]))
         lines.append("Successful signature or provenance verification does not by itself certify a SLSA level. "
                      "SBOM checksum declarations do not establish inventory completeness.")
+    if report.get("remote_acquisition"):
+        acquisition = report["remote_acquisition"]
+        lines += ["", "## Explicit remote acquisition", "",
+                  f"Status {_md(acquisition['status'])}; kind {_md(acquisition['kind'])}; "
+                  f"scope {_md(acquisition['scope'])}. "
+                  f"Resolved commit {_md(acquisition.get('commit') or 'not verified')}; "
+                  f"fetched {_md(acquisition.get('fetched_at') or 'not available')}. "
+                  f"{_md(acquisition.get('reason') or acquisition.get('binding') or '')}"]
     if report.get("baseline_conformance"):
         baseline = report["baseline_conformance"]
         lines += ["", "## OSPS Baseline conformance (not weighted)", "",
@@ -1255,12 +1459,16 @@ def main():
                     help="optional OpenVEX context; no automatic suppression or authentication")
     ap.add_argument("--allow-network-trust", action="store_true",
                     help="explicitly allow artifact verifiers' public trust lookup")
+    ap.add_argument("--acquire-remote", action="store_true",
+                    help="explicitly query OSV for exact package versions, acquire public "
+                         "GitHub commit archives, or scan OCI digests via installed OSV-Scanner")
     ap.add_argument("--snapshot-out", type=Path, help="write sanitized replayable JSON")
     ap.add_argument("--at", help="ISO-8601 evaluation time (UTC offset required)")
     args = ap.parse_args()
     if bool(args.target) != bool(args.mode) or args.replay and (
             args.evidence or args.ecosystem or args.baseline_evidence or
-            args.artifact_evidence or args.vex_evidence or args.allow_network_trust):
+            args.artifact_evidence or args.vex_evidence or args.allow_network_trust or
+            args.acquire_remote):
         ap.error("--target requires --mode; new evidence/options cannot be used with --replay")
     if args.allow_network_trust and not args.artifact_evidence:
         ap.error("--allow-network-trust requires --artifact-evidence")
@@ -1269,7 +1477,8 @@ def main():
                   evaluate(args.target, args.mode, args.evidence, args.at, args.ecosystem,
                            baseline_evidence=args.baseline_evidence,
                            artifact_input=args.artifact_evidence, vex_input=args.vex_evidence,
-                           allow_network_trust=args.allow_network_trust))
+                           allow_network_trust=args.allow_network_trust,
+                           acquire_remote=args.acquire_remote))
         if args.snapshot_out:
             snapshot = (json.dumps(report, indent=2) + "\n").encode("utf-8")
             if len(snapshot) > MAX_SNAPSHOT_BYTES:

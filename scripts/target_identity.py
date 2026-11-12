@@ -97,6 +97,10 @@ def _package(requested: str, ecosystem: str | None) -> dict:
         purl_type, name, version = match.groups()
         ecosystem_from_purl = _PURL_TYPES[purl_type.lower()]
         name, version = unquote(name), unquote(version)
+        if ecosystem_from_purl == "Maven":
+            if name.count("/") != 1 or any(not part for part in name.split("/")):
+                raise ValueError("Maven purls require group/artifact")
+            name = name.replace("/", ":")
         if ecosystem and ecosystem != ecosystem_from_purl:
             raise ValueError("Purl ecosystem conflicts with --ecosystem")
         ecosystem = ecosystem_from_purl
@@ -120,7 +124,8 @@ def _package(requested: str, ecosystem: str | None) -> dict:
             (ecosystem == "npm" and name.startswith("@") and
              not re.fullmatch(r"@[^/@\s]+/[^/@\s]+", name)):
         raise ValueError("Invalid package name or exact version")
-    purl = f"pkg:{_ECOSYSTEM_PURL[ecosystem]}/{quote(name, safe='/')}@{quote(version, safe='')}"
+    purl_name = name.replace(":", "/") if ecosystem == "Maven" else name
+    purl = f"pkg:{_ECOSYSTEM_PURL[ecosystem]}/{quote(purl_name, safe='/')}@{quote(version, safe='')}"
     return {"requested": requested, "kind": "package", "ecosystem": ecosystem,
             "name": name, "version": version, "purl": purl,
             "identifier": f"{ecosystem}:{name}@{version}",
