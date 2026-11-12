@@ -1,0 +1,2 @@
+# Optional local Security Insights YAML parsing; JSON and base advice need no package.
+PyYAML==6.0.2

@@ -31,8 +31,8 @@ A Software Bill of Materials (SBOM) is a machine-readable inventory of all compo
 brew install syft
 syft version  # For the examples below, use v1.57.1 and check its output.
 
-# Generate SPDX JSON 2.3 source-checkout SBOM (Syft v1.57.1 default)
-syft . -o spdx-json > sbom.spdx.json
+# Generate SPDX JSON 2.3 source-checkout SBOM (explicit version)
+syft dir:/path/to/checkout -o spdx-json@2.3 > sbom.spdx.json
 
 # Generate CycloneDX SBOM (only if a consumer requires it)
 syft . -o cyclonedx-json > sbom.cyclonedx.json
@@ -41,10 +41,40 @@ syft . -o cyclonedx-json > sbom.cyclonedx.json
 syft 'registry.example.org/owner/image@sha256:<actual-64-hex-digest>' -o spdx-json > image-sbom.spdx.json
 
 # Scan a directory
-syft dir:/path/to/project -o spdx-json > project-sbom.json
+syft dir:/path/to/project -o spdx-json@2.3 > project-sbom.json
 ```
 
 **Supported ecosystems**: npm, pip, go, cargo, maven, gradle, nuget, gem, composer, and more.
+
+The optional local runtime can scan an **explicit existing file** (`build_output`, with an independently expected SHA-256) or **explicit directory** (`source_checkout`). It does not build, fetch images, install Syft, sign, publish, or turn a source scan into release evidence. It sets an isolated Syft config, disables update checks and supported network enrichment (including Go tooling), and removes private system-temporary data after parsing. It does not require the target or current directory to be writable. If the selected system temporary location lies inside the scanned source, that scratch directory is excluded. This is **not** kernel-enforced network isolation.
+
+Use the ensemble's `--artifact-evidence` configuration with either
+`"sbom": {"path": "existing.spdx.json", "scope": "source_checkout"}` or
+`"sbom": {"generate": true, "scope": "source_checkout"}`. Choose exactly one
+input, and use `build_output` with an explicit artifact/digest for a release.
+The generator is optional and its absence yields a targeted gap, not a blocker
+on local advice. Source/file snapshots are bounded and checked before/after
+generation; concurrent changes reject the observation.
+
+Add `"validate_schema": true` to either SBOM configuration to request offline
+validation against the official SPDX 2.3 JSON schema using optional
+`skills/audit/requirements-sbom.txt` dependencies. Missing validation packages
+remain unknown; malformed documents fail. The unmodified bundled
+[`spdx-2.3.schema.json`](spdx-2.3.schema.json) is from the SPDX specification
+contributors at commit
+[`aadf3b0b8dbbabdb4d880b0fc714255fea436ff7`](https://github.com/spdx/spdx-spec/blob/aadf3b0b8dbbabdb4d880b0fc714255fea436ff7/schemas/spdx-schema.json),
+SHA-256 `239208b7ac287b3cf5d9a9af23f9d69863971102a5e1587a27a398b43490b89b`,
+provided under [CC BY 3.0](SPDX-SCHEMA-LICENSE). No schema is fetched at runtime.
+Schema acceptance checks the published structural rules, **not** all semantic
+consistency, inventory truth, completeness, or downstream tool compatibility.
+
+Advisory graph paths describe declared package relationships, not runtime/code
+reachability or exploitability. Existing normalized advisories are matched
+only by precise namespace/name/version and package URL, not rescanned or
+deducted again. Containment is distinct from dependency edges; cycles and
+disconnected/ambiguous components remain visible. Graph expansion is bounded
+to 10,000 routes/results and 128 nodes per path. Output is contextual
+`supply_chain_analysis`, not a second numeric risk score.
 
 ### Trivy
 **Best for**: Combined SBOM + vulnerability scanning

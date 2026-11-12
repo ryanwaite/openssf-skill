@@ -48,4 +48,49 @@ For other signing needs, [Gitsign](https://github.com/sigstore/gitsign) addresse
 - **npm trusted publishing** is an OIDC-based publishing option for supported providers/runners. Configure a publisher in npm, use npm **11.5.1+** and Node.js **22.14+** where applicable, grant the job `id-token: write`, and check the [current provider and runner restrictions](https://docs.npmjs.com/trusted-publishers/). `npm publish --provenance` applies only when its required CI/registry conditions are met; npm 9.5+ does **not** make every publication automatically carry provenance. Verify the actual published package and its attestation rather than inferring it from a command.
 - **PyPI trusted publishing** may attach a [PEP 740 attestation](https://docs.pypi.org/attestations/) **per distribution**. Confirm that each wheel and sdist has the expected attestation and digest; an attestation does not independently prove source correctness or satisfy SLSA Build Level 3.
 
+### Read-only public registry discovery
+
+For an **exact-version package target**, `scripts/registry_evidence.py` exposes
+`discover_registry_evidence(target, *, allow_fetch=False, request=None, expected_digests=None)`.
+The target is the package dictionary returned by `target_identity.resolve_target(...)`.
+Public network access is **off by default**; pass `allow_fetch=True` explicitly.
+`request(url) -> bytes` is an alternative opt-in for in-memory/offline tests;
+it must enforce its own I/O bounds if used with a real network. Optional
+`expected_digests` maps exact distribution filenames to independently obtained
+`sha256:<hex>` or `sha512:<hex>` strings. Without such a value, a registry digest
+is **observed metadata only**, not a comparison to a locally held artifact.
+
+The function returns JSON-safe `{status, facts, gaps}`. An `ok` status means
+**discovery completed**, never that a signature was verified. Both the top-level
+`facts.verification` and each attestation's `verification` are `not_verified`;
+`gaps` always records that signatures remain unverified and digest association
+is not trust. The report never assigns a signer identity, SLSA level, or security
+grade. Credential-bearing publisher/source claims are omitted from the report.
+Each npm tarball or PyPI wheel/sdist gets its own digest, source URL, expected
+digest comparison (when supplied), attestation status (`discovered`, `absent`,
+`unknown`, or `error`), and signed-statement *subject-to-registry-digest*
+comparison. Publisher/source values and DSSE statement contents are **unverified
+claims**. An absent attestation is distinct from an inaccessible provenance
+endpoint (e.g., PyPI 403) and a yanked file remains explicitly marked yanked.
+For enforcement, use a verifier that independently checks the exact artifact,
+signature, trust root, transparency log, and separately configured expected
+signer/issuer; do not derive expected policy from the discovered claims.
+
+Only official fixed HTTPS API endpoints are queried. npm uses
+[`GET /{package}/{version}`](https://github.com/npm/registry/blob/main/docs/REGISTRY-API.md)
+at `registry.npmjs.org` for `dist.integrity` and, if advertised, its
+`dist.attestations.url` at `/-/npm/v1/attestations/{package}@{version}`. Scoped
+names encode the slash as `%2F`; the returned URL is checked against the exact
+package/version before fetching. PyPI uses
+[`GET /pypi/{project}/{version}/json`](https://docs.pypi.org/api/json/)
+for *individual* distribution filenames and SHA-256 digests, then
+[`GET /integrity/{project}/{version}/{filename}/provenance`](https://docs.pypi.org/api/integrity/)
+for each file (PEP 740). PyPI's version JSON `provenance: null` does **not**
+establish that the Integrity API has no provenance. No tarball/wheel is fetched,
+no arbitrary URL from metadata is followed, and redirects are refused.
+Requests have a 3-second timeout, 20-second discovery budget, 512-KiB response
+cap, and at most 12 PyPI distributions; larger/unavailable responses remain
+unknown/error rather than becoming positive evidence. Public registry metadata
+may change; use an independently obtained digest for release identity.
+
 For a later maturity upgrade, bind SBOM and provenance to the **same shipped artifact digest**, publish verification instructions, and enforce identity/issuer/digest policy in the consuming deployment. None of those optional integrations is required before taking the first signing step.

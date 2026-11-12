@@ -108,15 +108,42 @@ def artifact_evidence(path, target, identity, *, allow_network_trust=False):
         )
     if "sbom" in data:
         config = data["sbom"]
-        if not isinstance(config, dict) or not {"path", "scope"} <= set(config) or \
-                set(config) - {"path", "scope", "subject_sha256"}:
+        if not isinstance(config, dict) or "scope" not in config or \
+                set(config) - {"path", "generate", "scope", "subject_sha256", "validate_schema"}:
             raise ValueError("Invalid SBOM evidence fields")
+        generated = config.get("generate")
+        validate_schema = config.get("validate_schema", False)
+        if type(validate_schema) is not bool:
+            raise ValueError("SBOM validate_schema must be boolean")
+        if ("generate" in config and generated is not True) or \
+                ("path" in config) == (generated is True):
+            raise ValueError("Choose exactly one SBOM path or generate:true")
         if config["scope"] != "source_checkout" and expected is None:
             raise ValueError("Release SBOM binding needs an explicitly expected local artifact")
-        results["sbom"] = ingest_spdx(
-            _path(parent, config["path"]), config["scope"],
-            subject_sha256=config.get("subject_sha256"), expected_sha256=expected,
-        )
+        if generated:
+            from sbom_analysis import generate_sbom
+
+            if "subject_sha256" in config:
+                raise ValueError("Generated SBOM uses the independently expected artifact digest; "
+                                 "do not supply a separate subject_sha256")
+            if config["scope"] == "source_checkout":
+                if identity["kind"] != "local_directory":
+                    raise ValueError("Source SBOM generation requires a local-directory target")
+                results["sbom"] = generate_sbom(identity["path"], "source_checkout",
+                                               validate_schema=validate_schema)
+            elif config["scope"] == "build_output":
+                results["sbom"] = generate_sbom(
+                    artifact_path, "build_output", expected_sha256=expected,
+                    validate_schema=validate_schema)
+            else:
+                raise ValueError("Generation supports source_checkout or a local build_output, "
+                                 "not automatic image pulling")
+        else:
+            results["sbom"] = ingest_spdx(
+                _path(parent, config["path"]), config["scope"],
+                subject_sha256=config.get("subject_sha256"), expected_sha256=expected,
+                validate_schema=validate_schema,
+            )
     return results
 
 
@@ -163,3 +190,11 @@ def reviewed_threat_input(path, target, identity, evaluated_at):
 
     data = _document(path, target, ("schema_version", "target", "threat_model"))
     return threat_evidence(identity, evaluated_at, data["threat_model"])
+
+
+def registry_digest_input(path, target):
+    """Load independently supplied per-distribution expectations, not registry claims."""
+    data = _document(path, target, ("schema_version", "target", "expected_digests"))
+    if not isinstance(data["expected_digests"], dict) or len(data["expected_digests"]) > 32:
+        raise ValueError("Registry expected_digests must be a bounded filename map")
+    return data["expected_digests"]

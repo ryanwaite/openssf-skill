@@ -84,6 +84,13 @@ five minutes in the future or older than 90 days relative to `--at` remains
 unscored, with the supplied scope visible. Replay preserves the captured
 observations and does not refresh services or authenticate an imported snapshot.
 
+Optional `security_insights`, `registry_evidence`, and `supply_chain_analysis`
+are contextual, unweighted sections. Maintainer claims, registry-advertised
+attestations, schema acceptance, and declared dependency paths do not raise
+assurance or satisfy a missing scored probe on their own. Correlating an existing
+advisory with an inventory path never creates a second deduction. There is no
+policy-version change for adding these observations; policy v2 remains in effect.
+
 ---
 
 ## 3. Mode weights

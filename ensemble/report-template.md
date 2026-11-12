@@ -69,6 +69,17 @@ Verification success does not imply a SLSA level or a complete dependency
 inventory. Declared VEX author identity is not authentication; do not silently
 suppress findings.
 
+If supplied, report generated/existing SPDX scope, structural/schema-validation
+status and declared dependency paths separately. Graph correlation does not
+re-score existing advisories or prove code reachability. Missing matches remain
+unresolved findings, not exclusions.
+
+Security Insights claims remain maintainer self-report even when their released
+schema validates. Registry metadata discovery must state `verification:
+not_verified`, distinguish each distribution's digest/attestations, and never
+imply a trusted signer or SLSA level from presence alone. Preserve these captured
+observations during replay without making new network requests.
+
 If remote acquisition was explicitly requested, show resolved commit/version/
 digest, public source, actual fetch time, scope and coverage limits. A commit
 archive has no Git history; an exact-version advisory query is not package

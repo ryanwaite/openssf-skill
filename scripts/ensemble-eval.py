@@ -45,10 +45,14 @@ from target_identity import resolve_target
 from remote_acquisition import acquire_repository, query_package, RemoteAcquisitionError
 from baseline_conformance import evaluate_conformance, load_evidence as load_baseline
 from supplemental_evidence import (
-    artifact_evidence, governance_inputs, read_document, reviewed_threat_input, vex_context,
+    artifact_evidence, governance_inputs, read_document, registry_digest_input,
+    reviewed_threat_input, vex_context,
 )
 from vulnerability_evidence import triage_osv_package
 from project_governance import governance_evidence, maintenance_evidence
+from sbom_analysis import correlate_sbom
+from security_insights import discover_security_insights, read_security_insights
+from registry_evidence import discover_registry_evidence
 
 # --- Risk model constants (mirror ensemble/risk-model.md) --------------------
 
@@ -1231,15 +1235,28 @@ def evaluate(target: str, mode: str, evidence: Optional[Path] = None,
              governance_input: Optional[Path] = None,
              threat_input: Optional[Path] = None,
              fetch_governance: bool = False,
-             governance_branch: Optional[str] = None) -> Dict[str, Any]:
+             governance_branch: Optional[str] = None,
+             insights_input: Optional[Path] = None,
+             fetch_registry: bool = False,
+             registry_digests: Optional[Path] = None) -> Dict[str, Any]:
     if fetch_governance and (governance_input or evaluated_at):
         raise ValueError("Live governance cannot be combined with an offline settings input or --at; "
                          "capture live settings now, then replay the snapshot")
     if governance_branch and not fetch_governance:
         raise ValueError("--governance-branch requires --fetch-governance")
+    if fetch_registry and evaluated_at:
+        raise ValueError("Live registry discovery cannot be combined with --at; "
+                         "capture current evidence, then replay its snapshot")
+    if registry_digests and not fetch_registry:
+        raise ValueError("--registry-digests requires --registry-evidence")
     evaluated_at = evaluated_at or datetime.now(timezone.utc).isoformat()
     _utc(evaluated_at)
     identity = resolve_target(target, ecosystem)
+    if fetch_registry and (identity["kind"] != "package" or
+                           identity.get("ecosystem") not in ("npm", "PyPI")):
+        raise ValueError("--registry-evidence requires an exact-version npm or PyPI package target")
+    expected_distributions = registry_digest_input(registry_digests, target) \
+        if registry_digests else None
     is_repo = identity["kind"] == "repo"
     is_local = identity["kind"] in ("local_directory", "local_file")
     is_dir = identity["kind"] == "local_directory"
@@ -1377,6 +1394,17 @@ def evaluate(target: str, mode: str, evidence: Optional[Path] = None,
     supplemental = artifact_evidence(
         artifact_input, target, identity, allow_network_trust=allow_network_trust
     ) if artifact_input else {}
+    insights = None
+    if insights_input:
+        if insights_input.is_dir():
+            insights = discover_security_insights(identity, evaluated_at, project_dir=insights_input)
+        else:
+            insights = read_security_insights(identity, insights_input, evaluated_at)
+    registry = discover_registry_evidence(
+        identity, allow_fetch=True, expected_digests=expected_distributions
+    ) if fetch_registry else None
+    if fetch_registry:
+        evaluated_at = datetime.now(timezone.utc).isoformat()
     for s in signals:
         controls = (("signature", "provenance") if s["name"] == "provenance"
                     else ("sbom",) if s["name"] == "supply_chain" else ())
@@ -1393,6 +1421,14 @@ def evaluate(target: str, mode: str, evidence: Optional[Path] = None,
     report = _report(target, mode, signals, evaluated_at, identity["kind"], identity)
     if acquisition:
         report["remote_acquisition"] = acquisition
+    if insights is not None:
+        report["security_insights"] = insights
+    if registry is not None:
+        report["registry_evidence"] = registry
+        if registry["status"] == "error":
+            report["actions"].insert(
+                0, "Review registry identity/digest or attestation metadata conflicts "
+                   "before relying on the selected distribution; signatures remain unverified.")
     if project:
         report["project_evidence"] = project
         governance = project.get("governance", {})
@@ -1412,6 +1448,9 @@ def evaluate(target: str, mode: str, evidence: Optional[Path] = None,
             f"Investigate the {key} evidence mismatch before relying on this artifact."
             for key in failures
         ] + report["actions"]
+        if "sbom" in supplemental:
+            known = next((s for s in signals if s["name"] == "known_vulns"), None)
+            report["supply_chain_analysis"] = correlate_sbom(supplemental["sbom"], known)
     if baseline_evidence:
         expected = identity.get("git_commit") if identity.get("git_dirty") is False else \
             identity.get("commit") if identity["kind"] == "repo" else \
@@ -1456,7 +1495,8 @@ def replay(snapshot: Path, evaluated_at: Optional[str] = None) -> Dict[str, Any]
         raise ValueError("Snapshot actions missing")
     report["actions"] = data["actions"]
     for name in ("artifact_evidence", "baseline_conformance", "vex_input",
-                 "remote_acquisition", "project_evidence"):
+                 "remote_acquisition", "project_evidence", "supply_chain_analysis",
+                 "security_insights", "registry_evidence"):
         if name in data:
             if not isinstance(data[name], dict):
                 raise ValueError("Invalid supplemental snapshot evidence")
@@ -1611,6 +1651,44 @@ def to_markdown(report: Dict[str, Any]) -> str:
                          + " ".join(_md(gap) for gap in result["gaps"]))
         lines.append("Successful signature or provenance verification does not by itself certify a SLSA level. "
                      "SBOM checksum declarations do not establish inventory completeness.")
+    if report.get("supply_chain_analysis"):
+        analysis = report["supply_chain_analysis"]
+        lines += ["", "## Inventory dependency context (not a second risk score)", "",
+                  f"Status {_md(analysis['status'])}. "
+                  + " ".join(_md(gap) for gap in analysis["gaps"])]
+        for match in analysis["facts"].get("matched", []):
+            lines.append(f"- **{_md(match['advisory_id'])}:** "
+                         f"{_md(match['name'])}@{_md(match['version'])}; "
+                         f"{_md(match['relation'])}; SPDX element {_md(match['spdx_id'])}.")
+        if analysis["facts"].get("unmatched_advisory_ids"):
+            lines.append("Unmatched advisories remain findings: "
+                         + ", ".join(_md(value) for value in
+                                     analysis["facts"]["unmatched_advisory_ids"]) + ".")
+    if report.get("security_insights"):
+        insights = report["security_insights"]
+        facts = insights["facts"]
+        lines += ["", "## Security Insights (maintainer self-report)", "",
+                  f"Status {_md(insights['status'])}; released schema validation "
+                  f"{_md(facts.get('schema_validation', 'not performed'))}. "
+                  + " ".join(_md(gap) for gap in insights["gaps"])]
+        for claim in facts.get("claims", []):
+            lines.append(f"- **{_md(claim['scope'])}.{_md(claim['field'])}:** "
+                         f"{_md(claim['value'])} (unverified self-report).")
+    if report.get("registry_evidence"):
+        registry = report["registry_evidence"]
+        lines += ["", "## Registry attestations (discovery, not verification)", "",
+                  f"Status {_md(registry['status'])}; cryptographic verification "
+                  f"{_md(registry['facts'].get('verification', 'not_verified'))}. "
+                  + " ".join(_md(gap) for gap in registry["gaps"])]
+        for distribution in registry["facts"].get("distributions", []):
+            digest = distribution["digest"]
+            lines.append(f"- **{_md(distribution['filename'])}:** "
+                         f"{_md(digest['algorithm'])}:{_md(digest['value'])}; "
+                         f"attestations {_md(distribution['attestations']['status'])}; "
+                         f"independent expected digest match "
+                         f"{_md(distribution.get('expected_digest_match'))}.")
+        lines.append("Registry metadata and publisher/source claims do not establish "
+                     "a trusted signature, source correctness, or SLSA level.")
     if report.get("project_evidence"):
         lines += ["", "## Project governance and reviewed scope", ""]
         for name, result in report["project_evidence"].items():
@@ -1710,6 +1788,12 @@ def main():
                     help="explicit read-only GitHub branch/ruleset and activity lookup via gh")
     ap.add_argument("--governance-branch",
                     help="literal branch for --fetch-governance (defaults to requested/default branch)")
+    ap.add_argument("--security-insights", type=Path,
+                    help="optional local Security Insights file or discovery directory (self-report)")
+    ap.add_argument("--registry-evidence", action="store_true",
+                    help="explicit public npm/PyPI attestation metadata discovery (not verification)")
+    ap.add_argument("--registry-digests", type=Path,
+                    help="target-bound independently expected distribution digests for registry discovery")
     ap.add_argument("--snapshot-out", type=Path, help="write sanitized replayable JSON")
     ap.add_argument("--at", help="ISO-8601 evaluation time (UTC offset required)")
     args = ap.parse_args()
@@ -1717,7 +1801,8 @@ def main():
             args.evidence or args.ecosystem or args.baseline_evidence or
             args.artifact_evidence or args.vex_evidence or args.allow_network_trust or
             args.acquire_remote or args.governance_evidence or args.threat_evidence or
-            args.fetch_governance or args.governance_branch):
+            args.fetch_governance or args.governance_branch or args.security_insights or
+            args.registry_evidence or args.registry_digests):
         ap.error("--target requires --mode; new evidence/options cannot be used with --replay")
     if args.allow_network_trust and not args.artifact_evidence:
         ap.error("--allow-network-trust requires --artifact-evidence")
@@ -1731,7 +1816,10 @@ def main():
                            governance_input=args.governance_evidence,
                            threat_input=args.threat_evidence,
                            fetch_governance=args.fetch_governance,
-                           governance_branch=args.governance_branch))
+                           governance_branch=args.governance_branch,
+                           insights_input=args.security_insights,
+                           fetch_registry=args.registry_evidence,
+                           registry_digests=args.registry_digests))
         if args.snapshot_out:
             snapshot = (json.dumps(report, indent=2) + "\n").encode("utf-8")
             if len(snapshot) > MAX_SNAPSHOT_BYTES:

@@ -65,6 +65,37 @@
       "governance_target": "github.com/ossf/scorecard",
       "governance_result": "Actual read-only exact-branch rules and stable-release/activity acquisition worked; HTTP403 legacy protection and unavailable bypass details remained partial/unscored. No settings changed.",
       "image_command": "OSV 2.7.1 scan image flag syntax checked against the installed official binary; Docker-backed image execution was not run."
+    },
+    "fourth_wave_network_recheck": {
+      "checked_on": "2026-11-12",
+      "resolvable": ["registry.npmjs.org", "pypi.org", "github.com"],
+      "unresolvable": ["tuf-repo-cdn.sigstore.dev", "api.osv.dev"],
+      "limitation": "DNS recheck only; no endpoint substitution or trust bypass. Earlier public TUF and online OSV live-validation blockers remain."
+    },
+    "local_inventory_and_schema_contract": {
+      "checked_on": "2026-11-12",
+      "syft_version": "v1.57.1",
+      "syft_archive_sha256": "bf52519eb57f675d47c07d43213cb6dff6449f3d6d1147ff6701ed91f44eef0c",
+      "syft_result": "Real checksum-verified Linux binary generated source and already-built synthetic tgz inventories. Artifact subject checksum matched; missing purls/dependency edges remained explicit partial evidence.",
+      "spdx_schema_source": "https://github.com/spdx/spdx-spec/blob/aadf3b0b8dbbabdb4d880b0fc714255fea436ff7/schemas/spdx-schema.json",
+      "spdx_schema_sha256": "239208b7ac287b3cf5d9a9af23f9d69863971102a5e1587a27a398b43490b89b",
+      "spdx_validator": "jsonschema==4.25.1 (optional)",
+      "spdx_result": "Generated SPDX 2.3 accepted by pinned official schema; missing required field rejected. Format validation is not completeness, truth or downstream interoperability.",
+      "cue_version": "v0.14.2",
+      "cue_archive_sha256": "de6bcd5a601ca53dde09de8e5f884a4bad23c91306f04ca6a6ce11dab48a8307",
+      "security_insights_schema_source": "https://github.com/ossf/security-insights/blob/701ac2a02ef17fc8b316f5df685428773c51372a/spec/schema.cue",
+      "security_insights_schema_sha256": "4e4b61470b5484fc8969f2a8a77ffbe0712a7c8a870c2079188f246c14cd58b1",
+      "security_insights_result": "Real isolated CUE accepted released-schema synthetic JSON/YAML and rejected a missing required field. Claims remain self-report."
+    },
+    "registry_discovery_contract": {
+      "checked_on": "2026-11-12",
+      "npm_metadata": "https://registry.npmjs.org/%40sigstore%2Fverify/2.0.0",
+      "npm_attestations": "https://registry.npmjs.org/-/npm/v1/attestations/@sigstore%2fverify@2.0.0",
+      "npm_result": "Exact-version metadata and two DSSE attestations discovered; subject digests matched registry integrity metadata.",
+      "pypi_metadata": "https://pypi.org/pypi/sampleproject/4.0.0/json",
+      "pypi_result": "Separate sampleproject-4.0.0 wheel and sdist SHA256 metadata and Integrity API attestations discovered; both subject digests matched registry metadata.",
+      "verification": "not_verified",
+      "limitation": "Public metadata GETs only; no package download/install or cryptographic attestation verification. Successful discovery did not raise risk scores or remove INCOMPLETE."
     }
   },
   "reference_workflows": {
