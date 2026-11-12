@@ -2,14 +2,24 @@
 
 import importlib.util
 from datetime import datetime, timezone
+import json
+import os
 from pathlib import Path
+import subprocess
+import sys
+import tempfile
 import unittest
+from unittest.mock import patch
 
 
 SPEC = importlib.util.spec_from_file_location(
     "project_governance", Path(__file__).resolve().parent.parent / "scripts/project_governance.py")
 pg = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(pg)
+RUNNER_SPEC = importlib.util.spec_from_file_location(
+    "governance_runner", Path(__file__).resolve().parent.parent / "scripts/ensemble-eval.py")
+runner = importlib.util.module_from_spec(RUNNER_SPEC)
+RUNNER_SPEC.loader.exec_module(runner)
 AT = "2026-11-12T00:00:00Z"
 SHA = "a" * 40
 IDENTITY = {"kind": "repo", "repo": "github.com/example/demo", "ref": "main",
@@ -286,6 +296,120 @@ class GovernanceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "after evaluated_at"):
             pg.governance_evidence(IDENTITY, AT,
                                    snapshot={**snapshot(), "captured_at": "2026-11-13T00:00:00Z"})
+
+
+class RunnerIntegrationTests(unittest.TestCase):
+    def test_imported_settings_score_only_complete_predicates_and_preserve_bypass_gaps(self):
+        target = "example/demo@main"
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "settings.json"
+            supplied = snapshot()
+            supplied["branch_protection"]["data"]["required_pull_request_reviews"].pop(
+                "bypass_pull_request_allowances")
+            data = {"schema_version": 1, "target": target, "governance": supplied,
+                    "maintenance": maintenance()}
+            path.write_text(json.dumps(data))
+            with patch.object(runner, "_have", return_value=False):
+                result = runner.evaluate(target, "produce", evaluated_at=AT, governance_input=path)
+            review = next(s for s in result["signals"] if s["name"] == "code_review")
+            self.assertEqual(review["subscore"], 100)
+            self.assertEqual(review["confidence"], "low")
+            self.assertEqual(review["evidence_type"], "manual_observation")
+            self.assertEqual(result["verdict"]["outcome"], "INCOMPLETE")
+            self.assertIn("Project governance", runner.to_markdown(result))
+            saved = Path(directory) / "snapshot.json"
+            saved.write_text(json.dumps(result))
+            with patch.object(runner, "_run") as run:
+                self.assertEqual(runner.replay(saved), result)
+                run.assert_not_called()
+            data["governance"] = snapshot()
+            path.write_text(json.dumps(data))
+            with patch.object(runner, "_have", return_value=False):
+                partial = runner.evaluate(target, "produce", evaluated_at=AT, governance_input=path)
+            review = next(s for s in partial["signals"] if s["name"] == "code_review")
+            self.assertEqual(review["status"], "unknown")
+            self.assertIsNone(review["subscore"])
+            self.assertTrue(any("bypass" in action for action in partial["actions"]))
+
+    def test_live_settings_use_actual_capture_time_and_explicit_read_only_requests(self):
+        fixture = snapshot()
+        fixture["branch_protection"]["data"]["required_pull_request_reviews"].pop(
+            "bypass_pull_request_allowances")
+
+        def request(path):
+            if path == "/repos/example/demo":
+                return fixture["repository_metadata"]
+            if path.endswith("/branches/main"):
+                return fixture["branch_info"]
+            if path.endswith("/protection"):
+                return fixture["branch_protection"]
+            if "/rules/branches/" in path:
+                return fixture["effective_rules"][0]
+            if "/rulesets?" in path:
+                return fixture["rulesets"][0]
+            return response(None, 404)
+
+        with patch.object(runner, "_have", return_value=False), \
+                patch.object(runner, "_github_request", side_effect=request) as api:
+            normal = runner.evaluate("example/demo", "produce")
+            api.assert_not_called()
+            live = runner.evaluate("example/demo", "produce", fetch_governance=True)
+            self.assertTrue(api.called)
+        self.assertNotIn("project_evidence", normal)
+        result = live["project_evidence"]["governance"]
+        self.assertEqual(result["status"], "ok")
+        self.assertEqual(result["provenance"]["evidence_type"], "injected_read_only_request")
+        self.assertLessEqual(result["facts"]["captured_at"], live["evaluated_at"])
+        with patch.object(runner, "_github_request") as api, \
+                self.assertRaisesRegex(ValueError, "capture live settings now"):
+            runner.evaluate("example/demo", "produce", evaluated_at=AT, fetch_governance=True)
+        api.assert_not_called()
+
+    def test_threat_area_is_useful_without_forge_or_tools_not_whole_project_grade(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "threat.json"
+            local = threat(target=directory, revision="reviewed working copy")
+            local["areas"][0]["coverage"] = "partial"
+            path.write_text(json.dumps({
+                "schema_version": 1, "target": directory, "threat_model": local}))
+            command = [sys.executable, "-S", str(Path(runner.__file__)),
+                       "--target", directory, "--mode", "produce", "--at", AT,
+                       "--threat-evidence", str(path)]
+            completed = subprocess.run(
+                command, cwd=directory, env={**os.environ, "PATH": ""},
+                capture_output=True, text=True, check=True)
+            result = json.loads(completed.stdout)
+            model = result["project_evidence"]["threat_model"]
+            self.assertEqual(model["facts"]["reviewed_areas"][0]["scope"], "authentication")
+            self.assertIsNone(model["facts"]["project_wide_coverage"])
+            coverage = next(s for s in result["signals"] if s["name"] == "threat_coverage")
+            self.assertEqual(coverage["status"], "unknown")
+            self.assertTrue(any("authentication" in action for action in result["actions"]))
+
+    def test_git_recency_uses_evaluation_time_not_wall_clock(self):
+        committed = int(pg._time("2026-11-01T00:00:00Z", "date").timestamp())
+        with tempfile.TemporaryDirectory() as directory:
+            (Path(directory) / ".git").mkdir()
+            with patch.object(runner, "_run", return_value=subprocess.CompletedProcess(
+                    [], 0, str(committed), "")):
+                recent = runner.probe_maintenance(directory, True, AT)
+                later = runner.probe_maintenance(directory, True, "2028-01-01T00:00:00Z")
+            self.assertEqual(recent["subscore"], 100)
+            self.assertEqual(later["subscore"], 50)
+
+    def test_github_header_contract_and_non_posix_fallback(self):
+        output = 'HTTP/2.0 200 OK\nLink: <next>; rel="next"\n\n[{"id": 1}]'
+        with patch.object(runner, "_have", return_value=True), \
+                patch.object(runner, "_run", return_value=subprocess.CompletedProcess(
+                    [], 0, output, "")) as run:
+            result = runner._github_request("/repos/example/demo/rulesets?page=1")
+        self.assertTrue(result["next"])
+        self.assertIn("GET", run.call_args.args[0])
+        self.assertIn("github.com", run.call_args.args[0])
+        with patch.dict(sys.modules, {"resource": None}), \
+                patch.object(runner.subprocess, "Popen") as process:
+            self.assertIsNone(runner._run_remote(["osv-scanner", "--version"]))
+            process.assert_not_called()
 
 
 class MaintenanceTests(unittest.TestCase):

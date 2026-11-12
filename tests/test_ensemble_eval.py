@@ -523,7 +523,8 @@ class TestAdapters(unittest.TestCase):
         self.assertEqual(historical["remote_acquisition"]["freshness"], "future")
         self.assertEqual(next(s for s in historical["signals"] if
                               s["name"] == "known_vulns")["status"], "unknown")
-        for response in (b'{"vulns":{}}',
+        for response in (b'{"vulns":{}}', b'{"error":"unavailable"}',
+                         b'{"unexpected_success_shape":true}',
                          b'{"vulns":[],"next_page_token":"x"}'):
             with self.subTest(response=response), \
                     patch.object(ra, "_read", side_effect=[response] * ra.MAX_PAGES):
@@ -627,7 +628,8 @@ class TestAdapters(unittest.TestCase):
     def test_remote_repo_archive_traversal_and_commit_mismatch_are_errors(self):
         commit = "a" * 40
         for entry_name, kind in (("repo-" + commit + "/../escape", tarfile.REGTYPE),
-                                 ("repo-" + commit + "/link", tarfile.SYMTYPE)):
+                                 ("repo-" + commit + "/link", tarfile.SYMTYPE),
+                                 ("", tarfile.REGTYPE)):
             with self.subTest(entry_name=entry_name):
                 archive_bytes = BytesIO()
                 with tarfile.open(fileobj=archive_bytes, mode="w:gz") as archive:
@@ -854,7 +856,8 @@ class TestEvidence(unittest.TestCase):
                 self_report = ee.evaluate(target, "produce", evidence, evaluated_at=AT)
             code_review = next(s for s in self_report["signals"]
                                if s["name"] == "code_review")
-            self.assertEqual(code_review["subscore"], 50)
+            self.assertIsNone(code_review["subscore"])
+            self.assertEqual(code_review["status"], "unknown")
             self.assertEqual(code_review["related_evidence"][0]["evidence_type"],
                              "self_report")
 

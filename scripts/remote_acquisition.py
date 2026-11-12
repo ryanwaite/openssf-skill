@@ -121,7 +121,10 @@ def _extract(raw, dest):
                 if time.monotonic() - start > 20:
                     raise RemoteAcquisitionError("Archive extraction exceeded its time limit")
                 if root is None:
-                    root = PurePosixPath(entry.name).parts[0]
+                    root_parts = PurePosixPath(entry.name).parts
+                    if not root_parts:
+                        raise RemoteAcquisitionError("Archive contains an empty entry path")
+                    root = root_parts[0]
                 parts = _entry_path(entry.name, root)
                 if not parts:
                     if not entry.isdir():
@@ -229,7 +232,8 @@ def query_package(identity):
             result = json.loads(raw)
         except (UnicodeError, ValueError) as exc:
             raise RemoteAcquisitionError("OSV query returned invalid JSON") from exc
-        if not isinstance(result, dict) or not isinstance(result.get("vulns", []), list):
+        if not isinstance(result, dict) or set(result) - {"vulns", "next_page_token"} or \
+                not isinstance(result.get("vulns", []), list):
             raise RemoteAcquisitionError("OSV query returned an invalid advisory list")
         advisories.extend(result.get("vulns", []))
         if len(advisories) > 2000:

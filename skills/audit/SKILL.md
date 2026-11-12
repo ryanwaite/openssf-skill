@@ -34,7 +34,8 @@ Determine (ask only if you can't infer) which mode applies:
 
 Identify the target: GitHub repo/ref, an exact package purl or `package@version`
 with `--ecosystem`, an OCI digest, or an explicit local path. Identity resolution
-does not download or scan remote targets. For local directories, run
+alone does not download or scan remote targets; `--acquire-remote` is a separate
+explicit option for supported public targets. For local directories, run
 `scripts/assess-project.py <path>` first to detect ecosystem and
 existing artifacts.
 
@@ -67,9 +68,10 @@ Rules:
 - Gitleaks potential matches are **not** verified live credentials. Its
   diagnostics and raw secrets must never appear in reports. Local scans
   distinguish git history from the working directory.
-- OSV source scanning requires a **local path** in this first wave. A package
-  spec or repo URL is not a lockfile; resolve it explicitly in later work or
-  manually inspect exact-version advisories now.
+- OSV source scanning requires a local path, which can be a supplied directory/
+  file or a bounded public commit archive explicitly requested with
+  `--acquire-remote`. A package coordinate uses the separate exact-version OSV
+  query; it is never passed as a lockfile. No remote acquisition is implicit.
 - OSV vector-only CVSS2/3/4 severity can be computed with the maintained
   optional `cvss==3.6` parser:
   `python3 -m pip install -r skills/audit/requirements-optional.txt`.
@@ -126,7 +128,7 @@ source, timestamp, tool name/version, and sanitized findings. Replay performs
 no scanner calls or target filesystem checks, and retains captured actions
 (including the evaluator's installed skill path); the policy version must match.
 When manual branch-review evidence is imported alongside local CODEOWNERS,
-the manual observation replaces only the CODEOWNERS proxy; reconciliation
+the manual observation supplements the unscored CODEOWNERS indicator; reconciliation
 appears in `evidence_note` and the Markdown report.
 
 ### Optional target-bound runtime evidence
@@ -187,7 +189,10 @@ Optional `provenance` fields are `path`, `expected_source_uri`
 (`github.com/owner/repo`), `expected_builder_id`, exactly one of
 `expected_source_tag` or `expected_source_branch`, and optional
 `expected_source_commit`. This path calls `slsa-verifier` and checks its
-verified SLSA v1 statement, not an arbitrary unverified JSON document.
+verified SLSA v0.2 or v1 statement, not an arbitrary unverified JSON document.
+The published generator v2.1.0 uses v0.2; its predicate version is not the SLSA
+framework version or a level claim. Only the supported predicate-specific
+builder/source/ref layouts are accepted.
 Public verifier trust lookup requires explicit `--allow-network-trust`;
 Cosign may instead use an independently supplied trusted root.
 Missing tools or trust material remain gaps, not successful verification.
@@ -205,6 +210,135 @@ without re-verifying signatures, network data, or references. Supplemental
 configuration files are limited to 1 MB; snapshots are limited to 32 MiB on
 both write and replay.
 
+### Optional remote and project evidence
+
+`--acquire-remote` adds one target-specific operation; it never installs,
+builds, executes, or signs target code:
+
+| Target | Operation and scope |
+|---|---|
+| Public GitHub repository/ref | Resolve the commit through `api.github.com`, fetch its commit-addressed `codeload.github.com` archive, and invoke an available local OSV source scanner on the temporary snapshot |
+| Exact package version | Paginated `api.osv.dev/v1/query` advisories for that ecosystem/name/version; no package download or dependency closure |
+| `ghcr.io` / `docker.io` image digest | Invoke `osv-scanner scan image` after installed-tool/running-Docker preflight; the scanner may pull the selected image, but the evaluator never starts Docker or runs the image |
+
+Acquisition has fixed public endpoint boundaries and does not forward GitHub
+credentials. GitHub redirects, archive traversal, links/devices, duplicates,
+oversized metadata or file contents, and incomplete extraction fail explicitly.
+Current archive bounds are 16 MiB compressed, 64 MiB total extracted regular
+file data, 8 MiB per file, 2,000 files, and 4,000 entries, with a separate bounded
+decompressed tar stream. A large unsupported repository is not silently
+truncated and called scanned.
+
+Remote source/image scanner processes are POSIX-only and bounded in duration
+and output. Remote source scanning uses an explicit empty scanner configuration,
+no ignore-file exclusions, disabled Go call analysis and transitive resolution,
+and does not run Rust build scripts. A source archive has **no Git history**:
+it is not a history-based secrets scan or submodule inventory. Paths retained
+in findings are relative to the resolved commit's snapshot, not temporary
+filesystem paths. OSV `--all-packages` preserves clean-package coverage;
+zero sources still means unknown coverage.
+
+`remote_acquisition` records source, scope, counts, commit/purl/digest, and
+actual fetch time. Acquisition observations over 90 days old or more than five
+minutes after a requested `--at` remain unscored; no historical capture time is
+fabricated. Replay preserves captured acquisition evidence without downloading
+again. Private registries/repositories, general code installation, and arbitrary
+URL fetches are not supported by this path.
+
+`--fetch-governance` separately requests read-only GitHub repository metadata,
+exact-branch protection/effective rules, ruleset details, commit, and latest
+stable release through existing `gh` access. It changes no settings and does not
+request new permissions. `--governance-branch` selects a literal branch when
+needed. Default branch selection is based on returned metadata, not assumed
+`main`. Missing access, truncated pages, bypass roles/actors, and a branch tip
+different from the assessed source revision remain explicit limitations.
+Only complete, primary-branch review/protection predicates can contribute a
+review score. A local CODEOWNERS file contributes no enforcement score.
+
+Live lookup is bounded to 40 distinct requests with a 90-second overall budget
+checked between calls and a 30-second per-call timeout. Exhausted budgets are
+gaps, not proof of missing controls. Live governance has an actual capture time
+after requests complete; it cannot
+be combined with `--at` or an offline governance input. To review historical
+evidence, capture a snapshot and replay it. Settings describe current controls,
+not proof that every historical PR received human approval. Contributor counts,
+bot commits, and long periods without changes do not establish human maintainer
+count, bus factor, or abandonment.
+
+For offline input, `--governance-evidence settings.json` uses this wrapper:
+
+```json
+{
+  "schema_version": 1,
+  "target": "example/demo@main",
+  "governance": {
+    "schema_version": 1,
+    "target": "github.com/example/demo",
+    "revision": "main",
+    "branch": "main",
+    "captured_at": "2026-11-12T00:00:00Z",
+    "repository_metadata": {"status": 403, "data": null},
+    "branch_info": {"status": 403, "data": null},
+    "branch_protection": {"status": 403, "data": null},
+    "effective_rules": [{"status": 403, "data": null, "next": false}],
+    "rulesets": [{"status": 403, "data": null, "next": false}],
+    "ruleset_details": {}
+  }
+}
+```
+
+Replace this deliberately inaccessible example with actual observed response
+envelopes; the example records gaps, not control absence. See the
+[governance API guide](../../references/code-review/security-review-guide.md)
+for a complete snapshot. The wrapper can instead or additionally contain
+`maintenance` with matching normalized target/revision/capture time and optional
+`repository`, `latest_commit`, `latest_release`, `support`, and `maintainers`
+observations. Imported snapshots are **not authenticated live API results**.
+Sources, reviewed dates, and self-reported support assertions remain separate.
+
+`--threat-evidence reviewed-threat.json` is independently useful without a forge
+account or scanner:
+
+```json
+{
+  "schema_version": 1,
+  "target": "./project",
+  "threat_model": {
+    "schema_version": 1,
+    "target": "./project",
+    "revision": "<reviewed revision>",
+    "captured_at": "2026-11-12T00:00:00Z",
+    "areas": [{
+      "scope": "Authentication",
+      "source": "Human architecture review",
+      "reference": "docs/threat-model.md",
+      "reviewed_at": "2026-11-11T00:00:00Z",
+      "reviewer": "<reviewer identity>",
+      "evidence_type": "manual_observation",
+      "coverage": "partial",
+      "assets": ["Sessions"],
+      "trust_boundaries": ["Untrusted login request to application"],
+      "limitations": ["Recovery flow not yet reviewed"]
+    }]
+  }
+}
+```
+
+Use the actual requested target and reviewed revision; when an immutable local
+commit/digest is known, the revision must match it. Unknown local identity does
+not prevent recording a clearly scoped review. Evidence is rendered under
+`project_evidence`; a reviewed area does not establish whole-project threat
+coverage. References and reviewer claims are not independently authenticated.
+
+Live compatibility checked on November 12, 2026: Cosign 3.1.4 successfully
+verified its published checksum-file bundle with an explicitly supplied,
+out-of-band trusted root; wrong signer/issuer/digest were rejected. SLSA v0.2/v1
+layouts are covered by upstream specimens and tests, but live positive
+`slsa-verifier` verification was blocked by public TUF DNS on this host.
+Online OSV service access was also DNS-blocked; actual scanner JSON shapes
+were checked against an isolated **synthetic** offline database. These are
+compatibility boundaries, not findings about the scanned packages.
+
 ### Step 3 — Fuse signals into a weighted verdict
 Apply **`ensemble/risk-model.md`** exactly:
 1. Normalize each signal to a 0–100 sub-score.
@@ -218,7 +352,7 @@ Apply **`ensemble/risk-model.md`** exactly:
 Show the math. A positive computed result with missing weighted evidence is
 `INCOMPLETE`, with a separately labeled `provisional_outcome`. Supported
 negative caps can still apply. Do not impose an arbitrary coverage threshold
-or invent a new set of core probes in this first wave.
+or invent a new set of core probes without an explicit policy decision.
 
 ### Step 4 — Produce the report
 Emit the report using **`ensemble/report-template.md`**. It must contain:

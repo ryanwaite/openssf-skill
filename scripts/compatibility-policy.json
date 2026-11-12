@@ -39,6 +39,32 @@
       "findings": "Exit 1 retains package identity, advisory groups, affected-package records and CVSS vectors.",
       "no_findings": "Exit 0 defaults to an empty results array; --all-packages retains package identities but omits their vulnerabilities field.",
       "network_limit": "Online scan exited 127 because api.osv.dev/deps.dev could not resolve from the validation host; offline output-shape checks do not establish live service availability."
+    },
+    "artifact_verifier_contract": {
+      "checked_on": "2026-11-12",
+      "cosign_version": "v3.1.4",
+      "cosign_binary_sha256": "424e2c97d0b45fd7a6b608a87f090f35633f4c23ece5f092d48bba11aaf4bbfa",
+      "cosign_artifact": "https://github.com/sigstore/cosign/releases/download/v3.1.4/cosign_checksums.txt",
+      "cosign_artifact_sha256": "e70e59b328d52949b3a9ae3e0d04721ea8f380c4e91c28197aa91df02afbf4c0",
+      "cosign_identity": "keyless@projectsigstore.iam.gserviceaccount.com",
+      "cosign_issuer": "https://accounts.google.com",
+      "cosign_result": "Real supplied-root verification succeeded; wrong signer, issuer and expected digest were rejected.",
+      "trusted_root_source": "https://github.com/sigstore/root-signing/blob/e22ad7fa7ff5314e08486ef1fc8aebc253baeb75/targets/trusted_root.json",
+      "trusted_root_sha256": "6494e21ea73fa7ee769f85f57d5a3e6a08725eae1e38c755fc3517c9e6bc0b",
+      "root_trust_boundary": "Pinned official repository plus targets.json hash checked out of band; not an independent cryptographic TUF bootstrap.",
+      "slsa_verifier_version": "v2.7.1",
+      "slsa_binary_sha256": "946dbec729094195e88ef78e1734324a27869f03e2c6bd2f61cbc06bd5350339",
+      "slsa_specimen": "https://github.com/slsa-framework/example-package/releases/tag/v15.0.1177",
+      "slsa_result": "Published v0.2 and upstream v1 statement layouts checked; live positive provenance verification blocked by public TUF DNS. Mocked parser cases are not a live trust-verification result.",
+      "network_limit": "Public trust lookup could not resolve tuf-repo-cdn.sigstore.dev on the validation host."
+    },
+    "remote_and_governance_contract": {
+      "checked_on": "2026-11-12",
+      "public_archive_target": "github.com/octocat/Hello-World@7fd1a60b01f91b314f59955a4e4d4e80d8edf11d",
+      "public_archive_result": "Actual unauthenticated GitHub commit lookup and codeload extraction succeeded; missing scanner remained unknown/INCOMPLETE rather than a clean scan.",
+      "governance_target": "github.com/ossf/scorecard",
+      "governance_result": "Actual read-only exact-branch rules and stable-release/activity acquisition worked; HTTP403 legacy protection and unavailable bypass details remained partial/unscored. No settings changed.",
+      "image_command": "OSV 2.7.1 scan image flag syntax checked against the installed official binary; Docker-backed image execution was not run."
     }
   },
   "reference_workflows": {
