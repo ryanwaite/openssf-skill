@@ -46,15 +46,22 @@ class EvidenceTests(unittest.TestCase):
         return ae.verify_signature(self.artifact, self.digest, self.bundle,
                                    SIGNER, ISSUER, trusted_root_path=self.root, **kw)
 
-    def statement(self, digest=None, builder=BUILDER, predicate=ae.PREDICATE):
+    def statement(self, digest=None, builder=BUILDER, predicate=ae.PREDICATE,
+                  commit=None):
+        source = "git+https://" + SOURCE + "@refs/tags/v1.0.0"
+        if predicate == ae.PREDICATE_V02:
+            details = {"builder": {"id": builder}, "invocation": {
+                "configSource": {"uri": source, "digest": {"sha1": commit or "a" * 40}}}}
+        else:
+            details = {"buildDefinition": {"resolvedDependencies": [{
+                "uri": source, "digest": {"gitCommit": commit or "a" * 40}}]},
+                "runDetails": {"builder": {"id": builder}}}
         return json.dumps({
             "_type": "https://in-toto.io/Statement/v0.1",
             "predicateType": predicate,
             "subject": [{"name": "artifact.tar", "digest": {
                 "sha256": digest or self.digest}}],
-            "predicate": {"buildDefinition": {"externalParameters": {
-                "source": {"uri": "git+https://" + SOURCE + "@refs/tags/v1.0.0"}}},
-                "runDetails": {"builder": {"id": builder}}}
+            "predicate": details
         }).encode()
 
     def provenance_result(self, **kw):
@@ -150,23 +157,42 @@ class EvidenceTests(unittest.TestCase):
         with patch.object(ae.shutil, "which", return_value="/usr/bin/slsa-verifier"):
             for content in (self.statement(digest="f" * 64),
                             self.statement(builder="https://example.org/other"),
-                            self.statement(predicate="https://slsa.dev/provenance/v0.2"),
+                            self.statement(predicate="https://example.org/other-predicate"),
                             b"not-json", b"x" * (ae.MAX_OUTPUT + 1)):
                 with patch.object(ae, "_execute", return_value=(0, content)):
                     self.assertEqual(self.provenance_result()["status"], "error")
 
-    def test_provenance_exact_source_commit_when_supplied(self):
+    def test_provenance_v02_and_v1_source_commit_when_supplied(self):
         commit = "a" * 40
-        statement = json.loads(self.statement())
-        statement["predicate"]["buildDefinition"]["externalParameters"]["source"]["digest"] = {
-            "sha1": commit}
+        for predicate in (ae.PREDICATE, ae.PREDICATE_V02):
+            with patch.object(ae.shutil, "which", return_value="/usr/bin/slsa-verifier"), \
+                    patch.object(ae, "_execute",
+                                 return_value=(0, self.statement(predicate=predicate,
+                                                                  commit=commit))):
+                result = self.provenance_result(expected_source_commit=commit)
+                self.assertEqual(result["status"], "ok")
+                self.assertEqual(result["facts"]["source_commit"], commit)
+                self.assertEqual(result["facts"]["predicate_type"], predicate)
+                self.assertEqual(self.provenance_result(expected_source_commit="b" * 40)
+                                 ["status"], "error")
+
+    def test_provenance_requires_matching_source_even_without_commit(self):
+        statement = json.loads(self.statement(predicate=ae.PREDICATE_V02))
+        statement["predicate"]["invocation"]["configSource"]["uri"] = (
+            "git+https://github.com/wrong/repo@refs/tags/v1.0.0")
         with patch.object(ae.shutil, "which", return_value="/usr/bin/slsa-verifier"), \
                 patch.object(ae, "_execute", return_value=(0, json.dumps(statement).encode())):
-            result = self.provenance_result(expected_source_commit=commit)
-            self.assertEqual(result["status"], "ok")
-            self.assertEqual(result["facts"]["source_commit"], commit)
-            self.assertEqual(self.provenance_result(expected_source_commit="b" * 40)["status"],
-                             "error")
+            self.assertEqual(self.provenance_result()["status"], "error")
+
+    def test_v1_resolved_dependency_commit_rejects_ambiguous_source(self):
+        statement = json.loads(self.statement(commit="a" * 40))
+        dependencies = statement["predicate"]["buildDefinition"]["resolvedDependencies"]
+        dependencies.append({"uri": dependencies[0]["uri"],
+                             "digest": {"gitCommit": "b" * 40}})
+        with patch.object(ae.shutil, "which", return_value="/usr/bin/slsa-verifier"), \
+                patch.object(ae, "_execute", return_value=(0, json.dumps(statement).encode())):
+            self.assertEqual(self.provenance_result(expected_source_commit="a" * 40)
+                             ["status"], "error")
 
     def test_provenance_rejects_wrong_source_and_ref_via_cli(self):
         def verify(cmd, **_):
@@ -278,6 +304,28 @@ class EvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(TimeoutError, "timed out"):
             ae._execute([sys.executable, "-c", "import time; time.sleep(2)"],
                         timeout=0.1)
+
+    def test_public_tuf_dns_failure_is_unknown_without_leaking_diagnostics(self):
+        diagnostic = ('tuf refresh failed: Get '
+                      '"https://tuf-repo-cdn.sigstore.dev/10.root.json": '
+                      'dial tcp: lookup tuf-repo-cdn.sigstore.dev: server misbehaving; '
+                      'token=not-for-results')
+        with self.assertRaises(ae.TrustLookupUnavailable):
+            ae._execute([sys.executable, "-c",
+                         "import sys; sys.stderr.write(" + repr(diagnostic) +
+                         "); sys.exit(1)"], public_trust=True)
+        with patch.object(ae.shutil, "which", return_value="/usr/bin/slsa-verifier"), \
+                patch.object(ae, "_execute", side_effect=ae.TrustLookupUnavailable(
+                    "Public Sigstore TUF trust lookup is unavailable.")):
+            result = self.provenance_result()
+        self.assertEqual(result["status"], "unknown")
+        self.assertNotIn("token", json.dumps(result))
+        with patch.object(ae.shutil, "which", return_value="/usr/bin/cosign"), \
+                patch.object(ae, "_execute", side_effect=ae.TrustLookupUnavailable(
+                    "Public Sigstore TUF trust lookup is unavailable.")):
+            result = ae.verify_signature(self.artifact, self.digest, self.bundle,
+                                         SIGNER, ISSUER, allow_network_trust=True)
+        self.assertEqual(result["status"], "unknown")
 
     def test_tool_error_and_timeout_never_leak_secrets(self):
         with patch.object(ae.shutil, "which", return_value="/usr/bin/cosign"), \
