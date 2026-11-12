@@ -1104,6 +1104,20 @@ def evaluate(target: str, mode: str, evidence: Optional[Path] = None,
                            "status": acquired_signal["status"],
                            "scope": "remote acquisition unavailable; no scan inferred"}
             acquired_signal["acquisition"] = acquisition
+        if acquisition.get("fetched_at"):
+            captured = acquisition["fetched_at"]
+            age_seconds = (_utc(evaluated_at) - _utc(captured)).total_seconds()
+            acquisition["age_days"] = round(age_seconds / 86400, 1)
+            acquisition["freshness"] = ("future" if age_seconds < -300 else
+                                        "stale" if age_seconds > 90 * 86400
+                                        else "current")
+            acquired_signal["captured_at"] = captured
+            if acquired_signal["status"] == "ok" and acquisition["freshness"] != "current":
+                acquired_signal.update(status="unknown", subscore=None, confidence="low",
+                                       finding=acquired_signal["finding"] + " Remote evidence is "
+                                       + acquisition["freshness"] + " relative to --at; "
+                                       "rerun with a current evaluation time.")
+                acquisition["status"] = "unknown"
 
     signals = [
         (signal("scorecard", "unknown", None, "low",
@@ -1406,7 +1420,9 @@ def to_markdown(report: Dict[str, Any]) -> str:
                   f"Status {_md(acquisition['status'])}; kind {_md(acquisition['kind'])}; "
                   f"scope {_md(acquisition['scope'])}. "
                   f"Resolved commit {_md(acquisition.get('commit') or 'not verified')}; "
-                  f"fetched {_md(acquisition.get('fetched_at') or 'not available')}. "
+                  f"fetched {_md(acquisition.get('fetched_at') or 'not available')}; "
+                  f"freshness {_md(acquisition.get('freshness') or 'unknown')} "
+                  f"(age {_md(acquisition.get('age_days') if acquisition.get('age_days') is not None else 'unknown')}d). "
                   f"{_md(acquisition.get('reason') or acquisition.get('binding') or '')}"]
     if report.get("baseline_conformance"):
         baseline = report["baseline_conformance"]

@@ -2,6 +2,7 @@
 
 import importlib.util
 from contextlib import redirect_stdout
+from datetime import datetime, timezone
 import gzip
 from io import BytesIO, StringIO
 import json
@@ -24,6 +25,7 @@ ee = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(ee)
 
 AT = "2026-11-09T12:00:00+00:00"
+REMOTE_AT = datetime.now(timezone.utc).isoformat()
 
 
 def sig(name, subscore, status="ok", raw=None, confidence="high", evidence_type="observation"):
@@ -479,7 +481,7 @@ class TestAdapters(unittest.TestCase):
                 patch.object(ee, "_have", return_value=False), \
                 patch.object(sys, "argv", ["ensemble-eval.py", "--target",
                                             "@scope/name@1.0", "--ecosystem", "npm",
-                                            "--mode", "consume", "--at", AT,
+                                            "--mode", "consume", "--at", REMOTE_AT,
                                             "--acquire-remote"]), \
                 redirect_stdout(StringIO()) as output:
             ee.main()
@@ -507,18 +509,26 @@ class TestAdapters(unittest.TestCase):
         identity = ee.resolve_target("requests@2.31.0", "PyPI")
         with patch.object(ra, "_read", return_value=b'{"vulns":[]}'):
             report = ee.evaluate(identity["requested"], "consume", ecosystem="PyPI",
-                                 evaluated_at=AT, acquire_remote=True)
+                                 evaluated_at=REMOTE_AT, acquire_remote=True)
         known = next(s for s in report["signals"] if s["name"] == "known_vulns")
         self.assertEqual(known["status"], "ok")
         self.assertEqual(known["raw"]["triage"][0]["package"]["ecosystem"], "PyPI")
         self.assertIn("malicious-code absence", known["finding"])
         self.assertEqual(report["remote_acquisition"]["advisories"], 0)
+        self.assertEqual(report["remote_acquisition"]["freshness"], "current")
+        self.assertEqual(known["captured_at"], report["remote_acquisition"]["fetched_at"])
+        with patch.object(ra, "_read", return_value=b'{"vulns":[]}'):
+            historical = ee.evaluate(identity["requested"], "consume", ecosystem="PyPI",
+                                     evaluated_at=AT, acquire_remote=True)
+        self.assertEqual(historical["remote_acquisition"]["freshness"], "future")
+        self.assertEqual(next(s for s in historical["signals"] if
+                              s["name"] == "known_vulns")["status"], "unknown")
         for response in (b'{"vulns":{}}',
                          b'{"vulns":[],"next_page_token":"x"}'):
             with self.subTest(response=response), \
                     patch.object(ra, "_read", side_effect=[response] * ra.MAX_PAGES):
                 result = ee.evaluate(identity["requested"], "consume", ecosystem="PyPI",
-                                     evaluated_at=AT, acquire_remote=True)
+                                     evaluated_at=REMOTE_AT, acquire_remote=True)
             known = next(s for s in result["signals"] if s["name"] == "known_vulns")
             self.assertEqual(known["status"], "error")
             self.assertIsNone(known["subscore"])
@@ -528,7 +538,7 @@ class TestAdapters(unittest.TestCase):
         with patch.object(ee, "_have", return_value=False), \
                 patch.object(ee, "_run_remote") as run:
             missing = ee.evaluate(identity["requested"], "consume",
-                                  evaluated_at=AT, acquire_remote=True)
+                                  evaluated_at=REMOTE_AT, acquire_remote=True)
         self.assertEqual(next(s for s in missing["signals"] if
                               s["name"] == "known_vulns")["status"], "unknown")
         run.assert_not_called()
@@ -545,7 +555,7 @@ class TestAdapters(unittest.TestCase):
                 patch.object(ee, "_run", side_effect=preflight), \
                 patch.object(ee, "_run_remote",
                              return_value=process(0, json.dumps(data))) as run:
-            report = ee.evaluate(identity["requested"], "consume", evaluated_at=AT,
+            report = ee.evaluate(identity["requested"], "consume", evaluated_at=REMOTE_AT,
                                  acquire_remote=True)
         self.assertEqual(next(s for s in report["signals"] if
                               s["name"] == "known_vulns")["status"], "ok")
@@ -555,7 +565,7 @@ class TestAdapters(unittest.TestCase):
         with patch.object(ee, "_have", return_value=True), \
                 patch.object(ee, "_run_remote") as run:
             unsupported = ee.evaluate("registry.example/app@sha256:" + "e" * 64,
-                                      "consume", evaluated_at=AT, acquire_remote=True)
+                                      "consume", evaluated_at=REMOTE_AT, acquire_remote=True)
         self.assertEqual(next(s for s in unsupported["signals"] if
                               s["name"] == "known_vulns")["status"], "error")
         run.assert_not_called()
@@ -598,7 +608,7 @@ class TestAdapters(unittest.TestCase):
                 patch.object(ee, "_have", return_value=True), \
                 patch.object(ee, "_run_remote", side_effect=scan), \
                 patch.object(ee, "_run", return_value=process(1)):
-            report = ee.evaluate("example/repo@main", "consume", evaluated_at=AT,
+            report = ee.evaluate("example/repo@main", "consume", evaluated_at=REMOTE_AT,
                                  acquire_remote=True)
         self.assertFalse(seen[0].exists())
         self.assertEqual(report["target_identity"]["identifier"],
@@ -629,14 +639,14 @@ class TestAdapters(unittest.TestCase):
                         patch.object(ra, "_read", return_value=archive_bytes.getvalue()), \
                         patch.object(ee, "_have", return_value=False):
                     report = ee.evaluate("example/repo@main", "consume",
-                                         evaluated_at=AT, acquire_remote=True)
+                                         evaluated_at=REMOTE_AT, acquire_remote=True)
                 self.assertEqual(report["remote_acquisition"]["status"], "error")
                 self.assertNotIn("commit", report["remote_acquisition"])
                 self.assertEqual(next(s for s in report["signals"] if
                                       s["name"] == "scorecard")["status"], "unknown")
         with patch.object(ra, "_json", return_value={"sha": "b" * 40}), \
                 patch.object(ra, "_read") as read:
-            report = ee.evaluate("example/repo@" + commit, "consume", evaluated_at=AT,
+            report = ee.evaluate("example/repo@" + commit, "consume", evaluated_at=REMOTE_AT,
                                  acquire_remote=True)
         self.assertEqual(report["remote_acquisition"]["status"], "error")
         read.assert_not_called()
