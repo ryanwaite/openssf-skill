@@ -446,6 +446,10 @@ requests; importing or evaluating a snapshot never fetches anything. The
 callable accepts a relative `/repos/{owner}/{repo}/...` path and returns
 `{"status": 200, "data": ..., "next": false}` (`next` is required on
 paginated pages). It must not issue write requests or follow arbitrary hosts.
+For live requests, pass `evaluated_at=None` to record the actual capture and
+evaluation time after all reads finish. Offline snapshots require an explicit
+timezone-aware evaluation time; a supplied historical time cannot backdate a
+live read.
 The branch rules endpoint `/rules/branches/{branch}` selects active rules
 actually applying to that branch, including organization rules. Rulesets with
 `evaluate` or `disabled` enforcement are inventory context, not effective

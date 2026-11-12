@@ -134,7 +134,7 @@ def _pages(request, path):
     return pages
 
 
-def _read_governance(identity, branch, request, at):
+def _read_governance(identity, branch, request):
     repo = _identity(identity).removeprefix("github.com/")
     base = f"/repos/{repo}"
     metadata = _response(request(base))
@@ -150,14 +150,12 @@ def _read_governance(identity, branch, request, at):
     if branch is None and (not selected or _SHA.fullmatch(selected)) and default is None:
         return {"schema_version": 1, "target": _identity(identity),
                 "revision": _revision(identity), "branch": None,
-                "captured_at": datetime.now(timezone.utc).isoformat(),
                 "repository_metadata": metadata}
     name = _branch(branch or (selected if selected and not _SHA.fullmatch(selected) else default))
     encoded = quote(name, safe="")
     return {
         "schema_version": 1, "target": _identity(identity),
         "revision": _revision(identity), "branch": name,
-        "captured_at": datetime.now(timezone.utc).isoformat(),
         "repository_metadata": metadata,
         "branch_info": _response(request(f"{base}/branches/{encoded}")),
         "branch_protection": _response(request(f"{base}/branches/{encoded}/protection")),
@@ -237,16 +235,20 @@ def governance_evidence(identity, evaluated_at, *, snapshot=None, request=None, 
     branch_info, branch_protection, effective_rules (pages), rulesets (pages),
     and ruleset_details (id -> response). The effective endpoint includes
     active repository and organization rules, but not disabled/evaluate rules.
+    evaluated_at=None is allowed only with an explicit live request callable;
+    its evaluated and capture times are stamped after the last read.
     """
-    at = _time(evaluated_at, "evaluated_at")
-    repo = _identity(identity)
     if (snapshot is None) == (request is None):
         raise ValueError("Supply exactly one offline snapshot or explicit request callable")
+    if evaluated_at is None and request is None:
+        raise ValueError("Offline governance evidence requires an explicit evaluated_at")
+    at = _time(evaluated_at, "evaluated_at") if evaluated_at is not None else None
+    repo = _identity(identity)
     origin = "injected_read_only_request" if request is not None else "caller_supplied_snapshot"
     if request is not None:
         if not callable(request):
             raise ValueError("request must be an injected read-only callable")
-        snapshot = _read_governance(identity, branch, request, at)
+        snapshot = _read_governance(identity, branch, request)
         ids = {rule.get("ruleset_id") for page in snapshot.get("effective_rules", [])
                if page["status"] == 200 and isinstance(page["data"], list)
                for rule in page["data"] if isinstance(rule, dict)}
@@ -257,6 +259,9 @@ def governance_evidence(identity, evaluated_at, *, snapshot=None, request=None, 
                 raise ValueError("Invalid effective ruleset id")
             snapshot["ruleset_details"][str(identifier)] = _response(
                 request(f"/repos/{repo.removeprefix('github.com/')}/rulesets/{identifier}"))
+        snapshot["captured_at"] = datetime.now(timezone.utc).isoformat()
+        if at is None:
+            at = _time(snapshot["captured_at"], "evaluated_at")
     _bound_evidence(identity, snapshot, at)
     ref = identity.get("ref")
     if snapshot.get("branch") is None and branch is None and \

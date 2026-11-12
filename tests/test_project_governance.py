@@ -1,6 +1,7 @@
 """Synthetic, offline regression cases for scoped governance evidence."""
 
 import importlib.util
+from datetime import datetime, timezone
 from pathlib import Path
 import unittest
 
@@ -206,6 +207,7 @@ class GovernanceTests(unittest.TestCase):
 
     def test_live_fetch_reads_effective_rules_and_each_ruleset_detail(self):
         paths = []
+        request_times = []
         fixture = snapshot(rules=[rule()], listed=[
             {"id": 42, "enforcement": "active", "source_type": "Organization"}],
             details={"42": response({"id": 42, "enforcement": "active",
@@ -213,6 +215,7 @@ class GovernanceTests(unittest.TestCase):
 
         def request(path):
             paths.append(path)
+            request_times.append(datetime.now(timezone.utc))
             if path == "/repos/example/demo":
                 return fixture["repository_metadata"]
             if path.endswith("/branches/main"):
@@ -225,11 +228,19 @@ class GovernanceTests(unittest.TestCase):
                 return fixture["effective_rules"][0]
             return fixture["rulesets"][0]
 
-        result = pg.governance_evidence({**IDENTITY, "verified": False},
-                                        "2099-01-01T00:00:00Z", request=request)
+        before = datetime.now(timezone.utc)
+        result = pg.governance_evidence({**IDENTITY, "verified": False}, None, request=request)
+        after = datetime.now(timezone.utc)
+        captured = datetime.fromisoformat(result["facts"]["captured_at"])
+        self.assertEqual(result["facts"]["evaluated_at"], result["facts"]["captured_at"])
+        self.assertLessEqual(before, request_times[-1])
+        self.assertLessEqual(request_times[-1], captured)
+        self.assertLessEqual(captured, after)
         self.assertTrue(result["facts"]["required_reviews"])
         self.assertIn("/repos/example/demo/rulesets/42", paths)
         self.assertIn("/repos/example/demo/rules/branches/main?per_page=100&page=1", paths)
+        with self.assertRaisesRegex(ValueError, "explicit evaluated_at"):
+            pg.governance_evidence(IDENTITY, None, snapshot=fixture)
 
     def test_named_branch_encoded_and_pagination_bounded(self):
         identity = {**IDENTITY, "ref": "release/1.0"}
