@@ -27,20 +27,28 @@ import argparse
 from datetime import datetime, timezone
 import json
 import math
+import os
 import re
 import shlex
 import shutil
+import signal as signal_module
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import quote
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from target_identity import resolve_target
+from remote_acquisition import acquire_repository, query_package, RemoteAcquisitionError
 from baseline_conformance import evaluate_conformance, load_evidence as load_baseline
-from supplemental_evidence import artifact_evidence, read_document, vex_context
+from supplemental_evidence import (
+    artifact_evidence, governance_inputs, read_document, reviewed_threat_input, vex_context,
+)
 from vulnerability_evidence import triage_osv_package
+from project_governance import governance_evidence, maintenance_evidence
 
 # --- Risk model constants (mirror ensemble/risk-model.md) --------------------
 
@@ -113,6 +121,43 @@ def _run(cmd: List[str], timeout: int = 180) -> Optional[subprocess.CompletedPro
         return None
 
 
+def _run_remote(cmd: List[str], *, timeout: int = 120) -> Optional[subprocess.CompletedProcess]:
+    """Bound scanner output and time; never preserve scanner diagnostics or credentials."""
+    try:
+        import resource
+    except ImportError:
+        return None  # Base/local advice remains available without POSIX process limits.
+    limit = 8 * 1024 * 1024
+    with tempfile.TemporaryDirectory(prefix="openssf-scan-") as home:
+        env = {"PATH": os.environ.get("PATH", ""), "HOME": home, "LANG": "C"}
+        env.update({key: os.environ[key] for key in (
+            "HTTPS_PROXY", "https_proxy", "NO_PROXY", "no_proxy",
+            "SSL_CERT_FILE", "SSL_CERT_DIR") if key in os.environ})
+        try:
+            with tempfile.TemporaryFile() as output:
+                proc = subprocess.Popen(
+                    cmd, stdout=output, stderr=subprocess.DEVNULL,
+                    env=env, start_new_session=True,
+                    preexec_fn=lambda: resource.setrlimit(resource.RLIMIT_FSIZE,
+                                                         (limit, limit)))
+                try:
+                    code = proc.wait(timeout=timeout)
+                except subprocess.TimeoutExpired:
+                    try:
+                        os.killpg(proc.pid, signal_module.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    proc.wait()
+                    return None
+                if output.tell() > limit:
+                    return None
+                output.seek(0)
+                return subprocess.CompletedProcess(
+                    cmd, code, output.read(limit).decode("utf-8", errors="replace"), "")
+        except OSError:
+            return None
+
+
 # --- Probes ------------------------------------------------------------------
 # Each probe returns a signal dict. When the underlying tool is unavailable the
 # probe returns an `unknown` signal so the gap is surfaced, never hidden.
@@ -142,7 +187,8 @@ def probe_scorecard(target: str, is_repo: bool, identity: Optional[Dict[str, Any
     if not repo or not _have("scorecard"):
         return signal("scorecard", "unknown", None, "low",
                       "Scorecard not run (needs `scorecard` CLI and a supported GitHub origin).")
-    ref = (identity or {}).get("git_commit") or (identity or {}).get("ref")
+    ref = ((identity or {}).get("git_commit") or (identity or {}).get("commit")
+           or (identity or {}).get("ref"))
     cmd = ["scorecard", f"--repo={repo}", "--format=json"]
     if ref:
         cmd.append(f"--commit={ref}")
@@ -433,52 +479,56 @@ def _osv_findings(data: Dict[str, Any], context: Optional[Dict[str, Any]] = None
                   key=lambda r: (r["ecosystem"], r["package"], r["version"], r["id"]))
 
 
-def probe_known_vulns(target: str, is_local: bool,
-                      identity: Optional[Dict[str, Any]] = None,
-                      context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    if not is_local:
-        return signal("known_vulns", "unknown", None, "low",
-                      "OSV source scan needs a local directory or lockfile/SPDX file. "
-                      "Repository URLs, package coordinates and OCI digests are not acquired or scanned.")
-    if identity and identity["kind"] == "local_file" and identity["file_type"] == "file":
-        return signal("known_vulns", "unknown", None, "low",
-                      "OSV supports recognized lockfiles and SPDX files; this file format is unsupported.")
-    if not _have("osv-scanner"):
-        return signal("known_vulns", "unknown", None, "low",
-                      "OSV-Scanner not installed.")
-    cmd = ["osv-scanner", "scan", "source", "--format=json", "--no-call-analysis=go"]
-    if identity and identity["kind"] == "local_file":
-        if identity["file_type"] == "spdx":
-            cmd.extend(["-L", identity["path"]])
-        else:
-            cmd.append(f"--lockfile=:{identity['path']}")
-    else:
-        cmd.extend(["--recursive", target])
-    proc = _run(cmd)
-    if proc is None or proc.returncode not in (0, 1) or not proc.stdout.strip():
-        return signal("known_vulns", "error", None, "low",
-                      "OSV-Scanner failed or produced no JSON; no clean result inferred.")
+def _osv_signal(data: Dict[str, Any], status_code: int,
+                context: Optional[Dict[str, Any]] = None, *,
+                source: str = "OSV-Scanner",
+                root: Optional[Path] = None,
+                all_packages: bool = False) -> Dict[str, Any]:
     counts = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0, "NONE": 0}
     try:
-        data = json.loads(proc.stdout)
         if not isinstance(data, dict) or not isinstance(data.get("results"), list):
             raise ValueError("Missing results")
+        for result in data["results"]:
+            if not isinstance(result, dict) or not isinstance(result.get("packages"), list):
+                raise ValueError("Missing packages")
+            for entry in result["packages"]:
+                if isinstance(entry, dict) and "vulnerabilities" not in entry and \
+                        all_packages and not entry.get("groups") and \
+                        isinstance(entry.get("package"), dict) and all(
+                            isinstance(entry["package"].get(key), str) and entry["package"][key]
+                            for key in ("ecosystem", "name", "version")):
+                    entry["vulnerabilities"] = []
+        if root:
+            for result in data["results"]:
+                path = result.get("source", {}).get("path")
+                if not isinstance(path, str) or not path:
+                    raise ValueError("Missing source path")
+                candidate = Path(path)
+                if candidate.is_absolute():
+                    try:
+                        candidate = candidate.relative_to(root)
+                    except ValueError as exc:
+                        raise ValueError("Scanner source outside acquired archive") from exc
+                if any(part in ("..", ".") for part in candidate.parts) or \
+                        not candidate.parts or not (root / candidate).is_file():
+                    raise ValueError("Scanner source outside acquired archive")
+                result["source"]["path"] = candidate.as_posix()
         triage = []
         findings = _osv_findings(data, context, triage)
         if not any(result["packages"] for result in data["results"]):
             return signal("known_vulns", "unknown", None, "low",
-                          "OSV-Scanner reported no scanned package sources; coverage unknown.",
-                          source="OSV-Scanner")
+                          f"{source} reported no scanned package sources; coverage unknown.",
+                          source=source)
         reported = any(entry["vulnerabilities"] for result in data["results"]
                        for entry in result["packages"])
-        if (proc.returncode == 0 and reported) or (proc.returncode == 1 and not reported):
+        if (status_code == 0 and reported) or (status_code == 1 and not reported):
             raise ValueError("Exit/output mismatch")
         for finding in findings:
             if finding["severity"] and finding["severity_status"] == "known":
                 counts[finding["severity"]] += 1
-    except (json.JSONDecodeError, TypeError, ValueError, KeyError):
+    except (TypeError, ValueError, KeyError):
         return signal("known_vulns", "error", None, "low",
-                      "OSV-Scanner exit status or JSON structure invalid; no clean result inferred.")
+                      f"{source} output or scope invalid; no clean result inferred.", source=source)
     score = 100
     for sev, n in counts.items():
         score -= sum(SEVERITY_DEDUCTION[sev] *
@@ -495,9 +545,122 @@ def probe_known_vulns(target: str, is_local: bool,
                   + ("verify unknown severities before scoring; optional "
                      "`cvss==3.6` calculates supported vectors, while malformed "
                      "or missing data needs manual review." if unknown else
-                     "Severity and fix data from OSV-Scanner."),
+                     f"Severity and fix data from {source}."),
                   raw={"counts": counts, "findings": findings, "triage": triage},
-                  source="OSV-Scanner", tool={"name": "osv-scanner", "version": "unrecorded"})
+                  source=source, tool={"name": "osv-scanner" if source == "OSV-Scanner"
+                                       else "OSV API", "version": "unrecorded"
+                                       if source == "OSV-Scanner" else "v1"})
+
+
+def probe_known_vulns(target: str, is_local: bool,
+                      identity: Optional[Dict[str, Any]] = None,
+                      context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    if not is_local:
+        return signal("known_vulns", "unknown", None, "low",
+                      "OSV source scan needs a local directory or lockfile/SPDX file. "
+                      "Repository URLs, package coordinates and OCI digests are not acquired or scanned.")
+    if identity and identity["kind"] == "local_file" and identity["file_type"] == "file":
+        return signal("known_vulns", "unknown", None, "low",
+                      "OSV supports recognized lockfiles and SPDX files; this file format is unsupported.")
+    if not _have("osv-scanner"):
+        return signal("known_vulns", "unknown", None, "low",
+                      "OSV-Scanner not installed.")
+    cmd = ["osv-scanner", "scan", "source", "--format=json", "--all-packages",
+           "--all-vulns", "--no-call-analysis=go"]
+    if identity and identity["kind"] == "local_file":
+        if identity["file_type"] == "spdx":
+            cmd.extend(["-L", identity["path"]])
+        else:
+            cmd.append(f"--lockfile=:{identity['path']}")
+    else:
+        cmd.extend(["--recursive", target])
+    proc = _run(cmd)
+    if proc is None or proc.returncode not in (0, 1) or not proc.stdout.strip():
+        return signal("known_vulns", "error", None, "low",
+                      "OSV-Scanner failed or produced no JSON; no clean result inferred.")
+    try:
+        data = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        return signal("known_vulns", "error", None, "low",
+                      "OSV-Scanner exit status or JSON structure invalid; no clean result inferred.")
+    return _osv_signal(data, proc.returncode, context, all_packages=True)
+
+
+def _remote_known_vulns(identity: Dict[str, Any], context: Dict[str, Any],
+                        source: Optional[Path] = None) -> Dict[str, Any]:
+    kind = identity["kind"]
+    if kind == "package":
+        advisories, metadata = query_package(identity)
+        package = {key: identity[key] for key in ("ecosystem", "name", "version", "purl")}
+        data = {"results": [{"source": {"path": identity["purl"]},
+                             "packages": [{"package": package,
+                                           "vulnerabilities": advisories}]}]}
+        result = _osv_signal(data, 1 if advisories else 0, context, source="OSV API")
+        result["acquisition"] = metadata
+        result["confidence"] = "medium" if result["status"] == "ok" else "low"
+        result["finding"] += (" Exact-version advisories only; package contents, malicious-code "
+                              "absence and dependency closure are not verified.")
+        return result
+    if os.name != "posix":
+        return signal("known_vulns", "unknown", None, "low",
+                      "Bounded remote source/image scanner execution currently requires a POSIX host; "
+                      "local advice and exact-package API queries remain available.")
+    if not _have("osv-scanner"):
+        return signal("known_vulns", "unknown", None, "low",
+                      "Install OSV-Scanner v2 for explicit remote source/image scanning.")
+    if kind == "repo":
+        with tempfile.TemporaryDirectory(prefix="openssf-osv-config-") as config_dir:
+            config = Path(config_dir) / "empty.toml"
+            config.write_text("", encoding="utf-8")
+            cmd = ["osv-scanner", "scan", "source", "--format=json",
+                   "--all-packages", "--all-vulns", "--no-call-analysis=go",
+                   "--no-resolve", "--no-ignore",
+                   f"--config={config}", "--recursive", str(source)]
+            proc = _run_remote(cmd)
+    elif kind == "image":
+        image = identity["image"]
+        registry = image.split("/", 1)[0].lower()
+        if registry not in ("ghcr.io", "docker.io") or "/" not in image:
+            return signal("known_vulns", "error", None, "low",
+                          "Image registry unsupported; specify ghcr.io or docker.io explicitly "
+                          "with an exact sha256 digest.")
+        if not _have("docker"):
+            return signal("known_vulns", "unknown", None, "low",
+                          "Image scanning requires an installed, running Docker daemon; "
+                          "start it explicitly or provide a local artifact.")
+        available = _run(["docker", "info", "--format={{.ServerVersion}}"], timeout=10)
+        capability = _run(["osv-scanner", "scan", "image", "--help"], timeout=10)
+        if not available or available.returncode != 0 or not capability or \
+                capability.returncode != 0 or "image" not in capability.stdout.lower():
+            return signal("known_vulns", "unknown", None, "low",
+                          "Docker daemon or OSV-Scanner image subcommand unavailable; "
+                          "do not auto-start Docker.")
+        cmd = ["osv-scanner", "scan", "image", "--format=json",
+               "--all-packages", "--all-vulns", "--no-call-analysis=go",
+               "--no-resolve", identity["identifier"]]
+        proc = _run_remote(cmd)
+    else:
+        raise ValueError("Unsupported remote acquisition target")
+    if proc is None or proc.returncode not in (0, 1) or not proc.stdout.strip():
+        return signal("known_vulns", "error", None, "low",
+                      "Explicit remote OSV scan failed, timed out or exceeded output limit; "
+                      "no clean result inferred.")
+    try:
+        data = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        return signal("known_vulns", "error", None, "low",
+                      "Explicit remote OSV scan returned invalid JSON.")
+    result = _osv_signal(data, proc.returncode, context,
+                         root=source if kind == "repo" else None, all_packages=True)
+    if kind == "image":
+        result["acquisition"] = {
+            "kind": "oci_digest_scan", "registry": registry,
+            "digest": identity["digest"], "reference": identity["identifier"],
+            "fetched_at": datetime.now(timezone.utc).isoformat(),
+            "scope": "OSV-Scanner image package inventory at requested digest; "
+                     "manifest identity not independently attested",
+        }
+    return result
 
 
 def probe_secrets(target: str, is_local: bool) -> Dict[str, Any]:
@@ -541,13 +704,18 @@ def probe_secrets(target: str, is_local: bool) -> Dict[str, Any]:
                   source="Gitleaks", tool={"name": "gitleaks", "version": "unrecorded"})
 
 
-def probe_maintenance(target: str, is_local: bool) -> Dict[str, Any]:
+def probe_maintenance(target: str, is_local: bool,
+                      evaluated_at: Optional[str] = None) -> Dict[str, Any]:
     """Use git history (local) or gh API (repo) to gauge activity."""
     if is_local and (Path(target) / ".git").exists():
         proc = _run(["git", "-C", target, "log", "-1", "--format=%ct"])
         if proc and proc.returncode == 0 and proc.stdout.strip().isdigit():
-            import time
-            age_days = max(0, (time.time() - int(proc.stdout.strip())) / 86400)
+            at = _utc(evaluated_at) if evaluated_at else datetime.now(timezone.utc)
+            committed = datetime.fromtimestamp(int(proc.stdout.strip()), timezone.utc)
+            if committed > at:
+                return signal("maintenance", "unknown", None, "low",
+                              "Latest commit is after the evaluation time; recency is not established.")
+            age_days = (at - committed).total_seconds() / 86400
             if age_days <= 90:
                 return signal("maintenance", "ok", 100, "medium",
                               f"Last commit {int(age_days)}d ago.")
@@ -569,7 +737,10 @@ def probe_maintenance(target: str, is_local: bool) -> Dict[str, Any]:
                     return signal("maintenance", "ok", 0, "high",
                                   "Repository is ARCHIVED.", raw=meta)
                 pushed = _utc(meta["pushed"])
-                age = max(0, (datetime.now(timezone.utc) - pushed).days)
+                at = _utc(evaluated_at) if evaluated_at else datetime.now(timezone.utc)
+                if pushed > at:
+                    raise ValueError("Push timestamp is after the evaluation time")
+                age = (at - pushed).days
                 score = 100 if age <= 90 else 75 if age <= 365 else 50
                 return signal("maintenance", "ok", score, "low",
                               f"Last push {age}d ago (release cadence and bus factor unverified).",
@@ -613,8 +784,9 @@ def probe_code_review(target: str, is_local: bool) -> Dict[str, Any]:
         has_codeowners = any((co / p).exists() for p in
                              ("CODEOWNERS", ".github/CODEOWNERS", "docs/CODEOWNERS"))
         if has_codeowners:
-            return signal("code_review", "ok", 50, "low",
-                          "CODEOWNERS present; branch-protection status unknown.")
+            return signal("code_review", "unknown", None, "low",
+                          "CODEOWNERS present; required reviews and effective protection remain unknown.",
+                          raw={"codeowners_present": True}, source="local files")
     return _placeholder("code_review",
                         "Confirm required reviews + protected default branch.")
 
@@ -753,6 +925,149 @@ def _confidence(signals: List[Dict[str, Any]], complete: bool) -> str:
 
 
 # --- Orchestration -----------------------------------------------------------
+
+def _github_request(path: str) -> Dict[str, Any]:
+    """Read bounded GitHub JSON with existing gh credentials, without changing settings."""
+    if not _have("gh"):
+        raise OSError("GitHub CLI is not installed")
+    proc = _run(["gh", "api", "--hostname", "github.com", "--method", "GET",
+                 "--include", path], timeout=30)
+    if proc is None or len(proc.stdout.encode("utf-8")) > 1_000_000:
+        raise OSError("GitHub response unavailable or too large")
+    header, separator, body = proc.stdout.replace("\r\n", "\n").partition("\n\n")
+    match = re.match(r"HTTP/[\d.]+\s+(\d{3})\b", header)
+    if not separator or not match:
+        raise OSError("GitHub response headers unavailable")
+    status = int(match.group(1))
+    data = None
+    if status == 200:
+        try:
+            data = json.loads(body)
+        except ValueError as exc:
+            raise OSError("GitHub returned invalid JSON") from exc
+    links = [line.partition(":")[2] for line in header.splitlines()
+             if line.lower().startswith("link:")]
+    return {"status": status, "data": data,
+            "next": any('rel="next"' in link for link in links)}
+
+
+def _fetch_project_evidence(identity: Dict[str, Any],
+                             branch: Optional[str] = None) -> Dict[str, Any]:
+    """Fetch exact-branch controls and limited activity facts only after explicit opt-in."""
+    repo = identity.get("repo")
+    if not isinstance(repo, str) or not re.fullmatch(
+            r"github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo):
+        raise ValueError("--fetch-governance requires a supported GitHub repository or local origin")
+    base = "/repos/" + repo.removeprefix("github.com/")
+    cache = {}
+    deadline = time.monotonic() + 90
+
+    def request(path):
+        if not (path == base or path.startswith(base + "/")) or \
+                ".." in path or "://" in path:
+            raise ValueError("Governance request is outside the selected repository")
+        if path not in cache:
+            if len(cache) >= 40 or time.monotonic() >= deadline:
+                raise OSError("GitHub governance request budget exceeded")
+            cache[path] = _github_request(path)
+        return cache[path]
+
+    try:
+        governance = governance_evidence(identity, None, request=request, branch=branch)
+        at = governance["facts"]["evaluated_at"]
+        metadata = cache.get(base, {})
+        data = metadata.get("data") if metadata.get("status") == 200 else None
+        evidence = {
+            "schema_version": 1, "target": repo,
+            "revision": identity.get("git_commit") or identity.get("commit") or identity.get("ref"),
+            "captured_at": at,
+        }
+        if isinstance(data, dict) and type(data.get("archived")) is bool:
+            evidence["repository"] = {
+                "archived": data["archived"], "pushed_at": data.get("pushed_at"),
+            }
+        ref = identity.get("git_commit") or identity.get("commit") or \
+            identity.get("ref") or governance["facts"].get("branch")
+        if ref:
+            latest = request(f"{base}/commits/{quote(ref, safe='')}")
+            commit = latest.get("data")
+            if latest["status"] == 200 and isinstance(commit, dict):
+                detail = commit.get("commit")
+                committer = detail.get("committer") if isinstance(detail, dict) else None
+                author = commit.get("author")
+                if isinstance(committer, dict) and committer.get("date"):
+                    evidence["latest_commit"] = {
+                        "committed_at": committer["date"],
+                        "author_type": author.get("type", "unknown") if isinstance(author, dict)
+                        else "unknown",
+                    }
+        release = request(f"{base}/releases/latest")
+        if release["status"] == 200 and isinstance(release.get("data"), dict):
+            evidence["latest_release"] = {
+                key: release["data"].get(key)
+                for key in ("tag_name", "draft", "prerelease", "published_at")
+            }
+        at = datetime.now(timezone.utc).isoformat()
+        evidence["captured_at"] = at
+        maintenance = maintenance_evidence(identity, at, evidence)
+        maintenance["provenance"]["evidence_type"] = "injected_read_only_request"
+        return {"governance": governance, "maintenance": maintenance}
+    except OSError:
+        return {"governance": {
+            "status": "unknown", "facts": {}, "provenance": {
+                "evidence_type": "injected_read_only_request", "authenticated_by_module": False},
+            "gaps": ["GitHub read-only lookup unavailable; check gh access or supply an offline snapshot."],
+            "limitations": ["Unavailable API access or exhausted request budgets do not prove "
+                            "that controls are absent."],
+        }}
+
+
+def _apply_project_evidence(signals: List[Dict[str, Any]],
+                            observations: Dict[str, Any]) -> None:
+    """Map only established predicates; preserve richer context without inventing assurance."""
+    for current in signals:
+        key = {"code_review": "governance", "maintenance": "maintenance",
+               "threat_coverage": "threat_model"}.get(current["name"])
+        if key not in observations:
+            continue
+        observation = observations[key]
+        facts = observation["facts"]
+        current.setdefault("contextual_evidence", {})[key] = observation
+        if key == "governance":
+            protected, reviews = facts.get("protected_branch"), facts.get("required_reviews")
+            primary = facts.get("branch") == facts.get("default_branch") and facts.get("branch")
+            if observation["status"] == "ok" and primary and \
+                    type(protected) is bool and type(reviews) is bool:
+                imported = observation.get("provenance", {}).get("evidence_type") == "caller_supplied_snapshot"
+                current.update(
+                    status="ok", subscore=50 * (protected + reviews),
+                    confidence="low" if imported else "medium",
+                    evidence_type="manual_observation" if imported else "observation",
+                    finding="Effective primary-branch protection and required review predicates assessed; "
+                            "individual review execution is not proven.",
+                    raw=facts, captured_at=facts.get("captured_at"),
+                    source="Imported GitHub settings" if imported else "GitHub settings API",
+                    tool={"name": "manual" if imported else "gh", "version": "unrecorded"},
+                )
+            else:
+                current.update(status="unknown", subscore=None, confidence="low",
+                               finding="Effective primary-branch review controls remain partial or unknown; "
+                                       "inspect bypass, permission, and branch-scope gaps.",
+                               raw=facts)
+        elif key == "maintenance":
+            support = facts.get("support", {})
+            if facts.get("archived") is True or (support.get("status") == "eol" and
+                                                 support.get("evidence_type") == "manual_observation"):
+                current.update(status="ok", subscore=0, confidence="low",
+                               finding="Archive or reviewed end-of-support evidence reported; "
+                                       "confirm the applicable scope and mitigations.",
+                               raw=facts, captured_at=facts.get("captured_at"))
+            # Release age, bots and contributor counts are not a maintainer/bus-factor score.
+        elif key == "threat_model":
+            current.update(status="unknown", subscore=None, confidence="low",
+                           finding="Reviewed threat-model areas are recorded; whole-project coverage "
+                                   "is not established by a partial area review.", raw=facts)
+
 
 def _utc(value: str) -> datetime:
     if not isinstance(value, str):
@@ -911,7 +1226,17 @@ def evaluate(target: str, mode: str, evidence: Optional[Path] = None,
              baseline_evidence: Optional[Path] = None,
              artifact_input: Optional[Path] = None,
              vex_input: Optional[Path] = None,
-             allow_network_trust: bool = False) -> Dict[str, Any]:
+             allow_network_trust: bool = False,
+             acquire_remote: bool = False,
+             governance_input: Optional[Path] = None,
+             threat_input: Optional[Path] = None,
+             fetch_governance: bool = False,
+             governance_branch: Optional[str] = None) -> Dict[str, Any]:
+    if fetch_governance and (governance_input or evaluated_at):
+        raise ValueError("Live governance cannot be combined with an offline settings input or --at; "
+                         "capture live settings now, then replay the snapshot")
+    if governance_branch and not fetch_governance:
+        raise ValueError("--governance-branch requires --fetch-governance")
     evaluated_at = evaluated_at or datetime.now(timezone.utc).isoformat()
     _utc(evaluated_at)
     identity = resolve_target(target, ecosystem)
@@ -921,9 +1246,69 @@ def evaluate(target: str, mode: str, evidence: Optional[Path] = None,
     scan_path = identity.get("path", target)
     context = vex_context(vex_input, target) if vex_input else {}
     context["as_of"] = evaluated_at
+    project = governance_inputs(governance_input, target, identity, evaluated_at) \
+        if governance_input else {}
+    if fetch_governance:
+        project = _fetch_project_evidence(identity, governance_branch)
+        evaluated_at = datetime.now(timezone.utc).isoformat()
+        context["as_of"] = evaluated_at
+    if threat_input:
+        project["threat_model"] = reviewed_threat_input(
+            threat_input, target, identity, evaluated_at)
+
+    acquisition = None
+    acquired_signal = None
+    if acquire_remote:
+        if identity["kind"] not in ("repo", "package", "image"):
+            raise ValueError("--acquire-remote requires a GitHub repository, exact package, or OCI digest")
+        try:
+            if identity["kind"] == "repo":
+                with acquire_repository(identity) as (source, acquisition):
+                    identity.update(commit=acquisition["commit"],
+                                    identifier=f"{identity['repo']}@{acquisition['commit']}",
+                                    resolved=True, immutable=True, verified=False)
+                    acquired_signal = _remote_known_vulns(identity, context, source)
+            else:
+                acquired_signal = _remote_known_vulns(identity, context)
+                acquisition = acquired_signal.get("acquisition")
+        except RemoteAcquisitionError as exc:
+            acquisition = {"kind": identity["kind"], "requested": target,
+                           "status": "error", "reason": str(exc),
+                           "scope": "remote acquisition incomplete; no scan inferred"}
+            acquired_signal = signal("known_vulns", "error", None, "low",
+                                     f"Remote acquisition failed: {exc}")
+        if acquisition:
+            acquisition["requested"] = target
+            acquisition["status"] = acquired_signal["status"]
+            acquired_signal["acquisition"] = acquisition
+        elif acquired_signal:
+            acquisition = {"kind": identity["kind"], "requested": target,
+                           "status": acquired_signal["status"],
+                           "scope": "remote acquisition unavailable; no scan inferred"}
+            acquired_signal["acquisition"] = acquisition
+        if acquisition.get("fetched_at"):
+            captured = acquisition["fetched_at"]
+            age_seconds = (_utc(evaluated_at) - _utc(captured)).total_seconds()
+            acquisition["age_days"] = round(age_seconds / 86400, 1)
+            acquisition["freshness"] = ("future" if age_seconds < -300 else
+                                        "stale" if age_seconds > 90 * 86400
+                                        else "current")
+            acquired_signal["captured_at"] = captured
+            if acquired_signal["status"] == "ok" and acquisition["freshness"] != "current":
+                acquired_signal.update(status="unknown", subscore=None, confidence="low",
+                                       finding=acquired_signal["finding"] + " Remote evidence is "
+                                       + acquisition["freshness"] + " relative to --at; "
+                                       "rerun with a current evaluation time.")
+                acquisition["status"] = "unknown"
 
     signals = [
-        probe_scorecard(target, is_repo, identity, mode, evaluated_at),
+        (signal("scorecard", "unknown", None, "low",
+                "Could not resolve the requested GitHub ref to a verified commit; "
+                "Scorecard default HEAD is not a substitute.")
+         if acquire_remote and is_repo and not identity.get("verified") and not
+         (acquisition and acquisition.get("commit"))
+         else probe_scorecard(target, is_repo, identity, mode, evaluated_at)),
+        acquired_signal if acquired_signal else
         probe_known_vulns(scan_path, is_local, identity, context),
         probe_provenance(target),
     ]
@@ -931,7 +1316,11 @@ def evaluate(target: str, mode: str, evidence: Optional[Path] = None,
         if is_dir or is_repo:
             maintenance_target = identity["path"] if is_dir else \
                 identity["repo"].removeprefix("github.com/")
-            maintenance = probe_maintenance(maintenance_target, is_dir)
+            maintenance = (signal("maintenance", "unknown", None, "low",
+                                  "Acquired commit archive has no git history; "
+                                  "review public repository maintenance separately.")
+                           if acquire_remote and is_repo else
+                           probe_maintenance(maintenance_target, is_dir, evaluated_at))
         else:
             maintenance = signal("maintenance", "unknown", None, "low",
                                  "Repository maintenance needs a local checkout or GitHub repo; "
@@ -951,9 +1340,8 @@ def evaluate(target: str, mode: str, evidence: Optional[Path] = None,
             observation = imported.get(s["name"])
             if not observation:
                 merged.append(s)
-            elif s["status"] != "ok":
-                merged.append(observation)
-            elif s["name"] == "code_review" and observation["status"] == "ok":
+            elif s["name"] == "code_review" and observation["status"] == "ok" and \
+                    isinstance(s.get("raw"), dict) and s["raw"].get("codeowners_present"):
                 observation["finding"] += (" Local CODEOWNERS presence also observed; "
                                            "this replaces only the CODEOWNERS proxy.")
                 observation["evidence_note"] = "Manual observation reconciled with local CODEOWNERS."
@@ -962,14 +1350,18 @@ def evaluate(target: str, mode: str, evidence: Optional[Path] = None,
                     "finding": s["finding"], "captured_at": s["captured_at"],
                 }]
                 merged.append(observation)
-            elif s["name"] == "code_review" and observation["status"] == "unknown":
+            elif s["name"] == "code_review" and observation["status"] == "unknown" and \
+                    isinstance(s.get("raw"), dict) and s["raw"].get("codeowners_present"):
                 s["evidence_note"] = ("Self-report received but not scored; "
-                                      "local CODEOWNERS proxy retained.")
+                                      "local CODEOWNERS indicator remains unverified.")
                 s["related_evidence"] = [observation]
                 merged.append(s)
+            elif s["status"] != "ok":
+                merged.append(observation)
             else:
                 raise ValueError("Manual evidence conflicts with an already measured signal")
         signals = merged
+    _apply_project_evidence(signals, project)
     for s in signals:
         if s["status"] == "ok" and not s["captured_at"]:
             s["captured_at"] = evaluated_at
@@ -999,6 +1391,20 @@ def evaluate(target: str, mode: str, evidence: Optional[Path] = None,
             s["finding"] = ("Artifact observations are available separately; verification "
                             "does not establish a SLSA level or complete transitive vulnerability coverage.")
     report = _report(target, mode, signals, evaluated_at, identity["kind"], identity)
+    if acquisition:
+        report["remote_acquisition"] = acquisition
+    if project:
+        report["project_evidence"] = project
+        governance = project.get("governance", {})
+        facts = governance.get("facts", {})
+        if facts.get("required_reviews") is False:
+            report["actions"].append("Review the primary branch's pull-request approval requirements.")
+        if facts.get("bypass_actors"):
+            report["actions"].append("Review the scope of reported review-bypass actors before relying on enforcement.")
+        for area in project.get("threat_model", {}).get("facts", {}).get("reviewed_areas", []):
+            if area["coverage"] != "current" or area["limitations"]:
+                report["actions"].append(
+                    f"Review uncovered assets and trust boundaries in the declared {area['scope']} scope.")
     if supplemental:
         report["artifact_evidence"] = supplemental
         failures = [key for key, result in supplemental.items() if result["status"] == "error"]
@@ -1049,7 +1455,8 @@ def replay(snapshot: Path, evaluated_at: Optional[str] = None) -> Dict[str, Any]
             isinstance(action, str) for action in data["actions"]):
         raise ValueError("Snapshot actions missing")
     report["actions"] = data["actions"]
-    for name in ("artifact_evidence", "baseline_conformance", "vex_input"):
+    for name in ("artifact_evidence", "baseline_conformance", "vex_input",
+                 "remote_acquisition", "project_evidence"):
         if name in data:
             if not isinstance(data[name], dict):
                 raise ValueError("Invalid supplemental snapshot evidence")
@@ -1204,6 +1611,43 @@ def to_markdown(report: Dict[str, Any]) -> str:
                          + " ".join(_md(gap) for gap in result["gaps"]))
         lines.append("Successful signature or provenance verification does not by itself certify a SLSA level. "
                      "SBOM checksum declarations do not establish inventory completeness.")
+    if report.get("project_evidence"):
+        lines += ["", "## Project governance and reviewed scope", ""]
+        for name, result in report["project_evidence"].items():
+            lines.append(f"- **{_md(name)}:** {_md(result['status'])}; "
+                         + " ".join(_md(gap) for gap in result["gaps"]))
+            facts = result["facts"]
+            if name == "governance":
+                lines.append(
+                    f"  Branch {_md(facts.get('branch') or 'unknown')}; "
+                    f"protected {_md(facts.get('protected_branch'))}; "
+                    f"required reviews {_md(facts.get('required_reviews'))}; "
+                    f"captured {_md(facts.get('captured_at') or 'not recorded')}.")
+            elif name == "maintenance":
+                release = facts.get("latest_stable_release")
+                if release:
+                    lines.append(f"  Observed stable release {_md(release['tag'])}: "
+                                 f"{_md(release['age_days'])} days before evaluation.")
+                if facts.get("support"):
+                    lines.append(f"  Declared support: {_md(facts['support']['status'])}; "
+                                 f"scope {_md(facts['support']['scope'])}.")
+            elif name == "threat_model":
+                for area in facts.get("reviewed_areas", []):
+                    lines.append(f"  Reviewed scope {_md(area['scope'])}: "
+                                 f"{_md(area['coverage'])}; {_md(area['reviewed_at'])}; "
+                                 f"source {_md(area['source'])}.")
+        lines.append("Imported settings/support are observations, not authenticated API results. "
+                     "One reviewed threat-model area does not establish whole-project coverage.")
+    if report.get("remote_acquisition"):
+        acquisition = report["remote_acquisition"]
+        lines += ["", "## Explicit remote acquisition", "",
+                  f"Status {_md(acquisition['status'])}; kind {_md(acquisition['kind'])}; "
+                  f"scope {_md(acquisition['scope'])}. "
+                  f"Resolved commit {_md(acquisition.get('commit') or 'not verified')}; "
+                  f"fetched {_md(acquisition.get('fetched_at') or 'not available')}; "
+                  f"freshness {_md(acquisition.get('freshness') or 'unknown')} "
+                  f"(age {_md(acquisition.get('age_days') if acquisition.get('age_days') is not None else 'unknown')}d). "
+                  f"{_md(acquisition.get('reason') or acquisition.get('binding') or '')}"]
     if report.get("baseline_conformance"):
         baseline = report["baseline_conformance"]
         lines += ["", "## OSPS Baseline conformance (not weighted)", "",
@@ -1255,12 +1699,25 @@ def main():
                     help="optional OpenVEX context; no automatic suppression or authentication")
     ap.add_argument("--allow-network-trust", action="store_true",
                     help="explicitly allow artifact verifiers' public trust lookup")
+    ap.add_argument("--acquire-remote", action="store_true",
+                    help="explicitly query OSV for exact package versions, acquire public "
+                         "GitHub commit archives, or scan OCI digests via installed OSV-Scanner")
+    ap.add_argument("--governance-evidence", type=Path,
+                    help="optional target-bound offline governance/maintenance observations")
+    ap.add_argument("--threat-evidence", type=Path,
+                    help="optional target-bound reviewed threat-model areas")
+    ap.add_argument("--fetch-governance", action="store_true",
+                    help="explicit read-only GitHub branch/ruleset and activity lookup via gh")
+    ap.add_argument("--governance-branch",
+                    help="literal branch for --fetch-governance (defaults to requested/default branch)")
     ap.add_argument("--snapshot-out", type=Path, help="write sanitized replayable JSON")
     ap.add_argument("--at", help="ISO-8601 evaluation time (UTC offset required)")
     args = ap.parse_args()
     if bool(args.target) != bool(args.mode) or args.replay and (
             args.evidence or args.ecosystem or args.baseline_evidence or
-            args.artifact_evidence or args.vex_evidence or args.allow_network_trust):
+            args.artifact_evidence or args.vex_evidence or args.allow_network_trust or
+            args.acquire_remote or args.governance_evidence or args.threat_evidence or
+            args.fetch_governance or args.governance_branch):
         ap.error("--target requires --mode; new evidence/options cannot be used with --replay")
     if args.allow_network_trust and not args.artifact_evidence:
         ap.error("--allow-network-trust requires --artifact-evidence")
@@ -1269,7 +1726,12 @@ def main():
                   evaluate(args.target, args.mode, args.evidence, args.at, args.ecosystem,
                            baseline_evidence=args.baseline_evidence,
                            artifact_input=args.artifact_evidence, vex_input=args.vex_evidence,
-                           allow_network_trust=args.allow_network_trust))
+                           allow_network_trust=args.allow_network_trust,
+                           acquire_remote=args.acquire_remote,
+                           governance_input=args.governance_evidence,
+                           threat_input=args.threat_evidence,
+                           fetch_governance=args.fetch_governance,
+                           governance_branch=args.governance_branch))
         if args.snapshot_out:
             snapshot = (json.dumps(report, indent=2) + "\n").encode("utf-8")
             if len(snapshot) > MAX_SNAPSHOT_BYTES:

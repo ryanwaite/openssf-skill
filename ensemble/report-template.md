@@ -69,6 +69,17 @@ Verification success does not imply a SLSA level or a complete dependency
 inventory. Declared VEX author identity is not authentication; do not silently
 suppress findings.
 
+If remote acquisition was explicitly requested, show resolved commit/version/
+digest, public source, actual fetch time, scope and coverage limits. A commit
+archive has no Git history; an exact-version advisory query is not package
+content or transitive-dependency verification.
+
+When project evidence is supplied, distinguish live read-only settings from
+imported response snapshots. Show exact branch, effective review/protection
+predicates, bypass and permission gaps, and release/support context. Do not
+infer maintainer count from contributors, enforcement from CODEOWNERS, or
+whole-project coverage from one reviewed threat-model area.
+
 ## OSPS Baseline conformance (not weighted)
 
 If supplied, report catalog version, maturity level, target/revision/scope,

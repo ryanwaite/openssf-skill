@@ -137,3 +137,29 @@ def vex_context(path, target):
         raise ValueError("VEX max_age_days must be a nonnegative integer")
     return {"vex_documents": data["documents"], "trusted_authors": authors,
             "authenticated_authors": (), "max_age_days": age}
+
+
+def governance_inputs(path, target, identity, evaluated_at):
+    """Validate optional imported settings/support evidence, not live API claims."""
+    from project_governance import governance_evidence, maintenance_evidence
+
+    data = _document(path, target, ("schema_version", "target"),
+                     ("governance", "maintenance"))
+    if not any(key in data for key in ("governance", "maintenance")):
+        raise ValueError("Supply governance or maintenance observations")
+    results = {}
+    if "governance" in data:
+        results["governance"] = governance_evidence(
+            identity, evaluated_at, snapshot=data["governance"])
+    if "maintenance" in data:
+        results["maintenance"] = maintenance_evidence(
+            identity, evaluated_at, data["maintenance"])
+    return results
+
+
+def reviewed_threat_input(path, target, identity, evaluated_at):
+    """Accept a reviewed local scope without requiring forge access or scanners."""
+    from project_governance import threat_evidence
+
+    data = _document(path, target, ("schema_version", "target", "threat_model"))
+    return threat_evidence(identity, evaluated_at, data["threat_model"])

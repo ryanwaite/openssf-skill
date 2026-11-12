@@ -22,6 +22,7 @@ MAX_OUTPUT = 1024 * 1024
 MAX_ITEMS = 5000
 TIMEOUT = 45
 PREDICATE = "https://slsa.dev/provenance/v1"
+PREDICATE_V02 = "https://slsa.dev/provenance/v0.2"
 STATEMENTS = {"https://in-toto.io/Statement/v1",
               "https://in-toto.io/Statement/v0.1"}
 _SHA256 = re.compile(r"[0-9a-fA-F]{64}\Z")
@@ -31,6 +32,10 @@ _ID = re.compile(r"SPDXRef-[A-Za-z0-9.-]+\Z")
 _CREDENTIAL = re.compile(
     r"(?i)(?:api[_-]?key|token|secret|password|credential)\s*[=:]|"
     r"://[^/\s]+:[^/@\s]+@")
+
+
+class TrustLookupUnavailable(Exception):
+    """The verifier could not reach the public Sigstore TUF trust root."""
 
 
 def _result(status, facts=None, *gaps):
@@ -115,12 +120,13 @@ def _uri(value, *, github=False):
     return value
 
 
-def _execute(args, timeout=TIMEOUT):
+def _execute(args, timeout=TIMEOUT, *, public_trust=False):
     """Capture only bounded output; never surface untrusted CLI diagnostics."""
     with subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                           start_new_session=True) as proc:
         selector = selectors.DefaultSelector()
         output = bytearray()
+        diagnostics = bytearray()
         try:
             for stream in (proc.stdout, proc.stderr):
                 os.set_blocking(stream.fileno(), False)
@@ -137,13 +143,21 @@ def _execute(args, timeout=TIMEOUT):
                         continue
                     if key.fileobj is proc.stdout:
                         output.extend(chunk)
+                    elif public_trust and len(diagnostics) < 8192:
+                        diagnostics.extend(chunk[:8192 - len(diagnostics)])
                     if len(output) > MAX_OUTPUT:
                         raise ValueError("Verification tool output exceeds the size limit.")
-                    # stderr is deliberately discarded, including on failure.
+                    # Keep only enough stderr to identify a known trust-lookup outage.
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise TimeoutError("Verification tool timed out.")
-            return proc.wait(timeout=remaining), bytes(output)
+            code = proc.wait(timeout=remaining)
+            if code and public_trust and b"tuf refresh failed:" in diagnostics and \
+                    b"lookup tuf-repo-cdn.sigstore.dev" in diagnostics:
+                raise TrustLookupUnavailable(
+                    "Public Sigstore TUF trust lookup is unavailable; restore DNS access "
+                    "to tuf-repo-cdn.sigstore.dev and retry.")
+            return code, bytes(output)
         except (TimeoutError, ValueError, subprocess.TimeoutExpired) as exc:
             proc.kill()
             proc.wait()
@@ -199,7 +213,7 @@ def verify_signature(artifact_path, expected_sha256, bundle_path, expected_signe
         if root:
             cmd += ["--trusted-root", str(root)]
         cmd.append(str(artifact))
-        code, _ = _execute(cmd)
+        code, _ = _execute(cmd, public_trust=not root)
         _postflight(artifact, digest)
         if code:
             return _result("error", {"sha256": digest},
@@ -209,6 +223,8 @@ def verify_signature(artifact_path, expected_sha256, bundle_path, expected_signe
                               "trust": "supplied_root" if root else "public_lookup",
                               "tool": "cosign"},
                        "A blob signature does not establish build provenance or a SLSA level.")
+    except TrustLookupUnavailable as exc:
+        return _result("unknown", None, str(exc))
     except (ValueError, OSError, TimeoutError) as exc:
         return _result("error", None, str(exc) if isinstance(exc, (ValueError, TimeoutError))
                        else "Cannot read local verification input or run Cosign.")
@@ -219,7 +235,7 @@ def verify_provenance(artifact_path, expected_sha256, provenance_path,
                       expected_source_tag=None, expected_source_branch=None,
                       expected_source_commit=None,
                       allow_network_trust=False):
-    """Verify a local SLSA v1 attestation with slsa-verifier v2.7.1.
+    """Verify a local SLSA v0.2 or v1 attestation with slsa-verifier v2.7.1.
 
     The verifier's public trust lookup is explicitly opt-in. The verified
     statement is parsed for predicate and subject; no SLSA level is inferred.
@@ -250,7 +266,7 @@ def verify_provenance(artifact_path, expected_sha256, provenance_path,
                str(provenance), "--source-uri", source, "--builder-id", builder,
                "--source-tag" if expected_source_tag else "--source-branch", ref,
                "--print-provenance"]
-        code, output = _execute(cmd)
+        code, output = _execute(cmd, public_trust=True)
         _postflight(artifact, digest)
         if code:
             return _result("error", {"sha256": digest},
@@ -263,7 +279,7 @@ def verify_provenance(artifact_path, expected_sha256, provenance_path,
         except (UnicodeError, json.JSONDecodeError, RecursionError) as exc:
             raise ValueError("Malformed verified provenance statement.") from exc
         if not isinstance(statement, dict) or statement.get("_type") not in STATEMENTS or \
-                statement.get("predicateType") != PREDICATE:
+                statement.get("predicateType") not in (PREDICATE, PREDICATE_V02):
             raise ValueError("Unsupported in-toto statement or SLSA predicate.")
         subjects = statement.get("subject")
         if not isinstance(subjects, list) or not any(
@@ -271,29 +287,45 @@ def verify_provenance(artifact_path, expected_sha256, provenance_path,
                 s["digest"].get("sha256") == digest for s in subjects):
             raise ValueError("Verified provenance has no matching artifact subject.")
         predicate = statement.get("predicate")
-        if not isinstance(predicate, dict) or not isinstance(predicate.get("buildDefinition"), dict) \
-                or not isinstance(predicate.get("runDetails"), dict) or \
-                not isinstance(predicate["runDetails"].get("builder"), dict) or \
-                predicate["runDetails"]["builder"].get("id") != builder:
+        if not isinstance(predicate, dict):
             raise ValueError("Verified provenance is missing the expected builder.")
+        expected_uri = ("git+https://" + source.removeprefix("https://") +
+                        "@refs/" + ("tags/" if expected_source_tag else "heads/") + ref)
+        if statement["predicateType"] == PREDICATE_V02:
+            invocation = predicate.get("invocation")
+            source_data = invocation.get("configSource") if isinstance(invocation, dict) else None
+            actual_builder = predicate.get("builder")
+            sources = [source_data]
+        else:
+            definition = predicate.get("buildDefinition")
+            details = predicate.get("runDetails")
+            sources = definition.get("resolvedDependencies") if isinstance(definition, dict) else None
+            actual_builder = details.get("builder") if isinstance(details, dict) else None
+        if not isinstance(actual_builder, dict) or actual_builder.get("id") != builder:
+            raise ValueError("Verified provenance is missing the expected builder.")
+        if not isinstance(sources, list):
+            raise ValueError("Verified provenance has no supported source dependencies.")
+        matches = [item for item in sources if isinstance(item, dict) and
+                   item.get("uri") == expected_uri]
+        if not matches:
+            raise ValueError("Verified provenance does not match the expected source and ref.")
         if expected_source_commit:
-            external = predicate["buildDefinition"].get("externalParameters")
-            source_data = external.get("source") if isinstance(external, dict) else None
-            expected_uri = ("git+https://" + source.removeprefix("https://") +
-                            "@refs/" + ("tags/" if expected_source_tag else "heads/") + ref)
-            algorithm = "sha1" if len(expected_source_commit) == 40 else "sha256"
-            if not isinstance(source_data, dict) or source_data.get("uri") != expected_uri \
-                    or not isinstance(source_data.get("digest"), dict) or \
-                    not isinstance(source_data["digest"].get(algorithm), str) or \
-                    source_data["digest"][algorithm].lower() != expected_source_commit.lower():
+            algorithm = ("sha1" if len(expected_source_commit) == 40 else "sha256") \
+                if statement["predicateType"] == PREDICATE_V02 else "gitCommit"
+            if any(not isinstance(item.get("digest"), dict) or
+                   not isinstance(item["digest"].get(algorithm), str) or
+                   item["digest"][algorithm].lower() != expected_source_commit.lower()
+                   for item in matches):
                 raise ValueError("Verified provenance does not match the expected source commit and ref.")
         return _result("ok", {"sha256": digest, "provenance_verified": True,
-                              "predicate_type": PREDICATE, "builder_id": builder,
+                              "predicate_type": statement["predicateType"], "builder_id": builder,
                               "source_uri": source, "source_ref": ref,
                               "source_commit": expected_source_commit.lower()
                               if expected_source_commit else None,
                               "tool": "slsa-verifier"},
                        "Build and Source track levels require separate control assessment.")
+    except TrustLookupUnavailable as exc:
+        return _result("unknown", None, str(exc))
     except (ValueError, OSError, TimeoutError) as exc:
         return _result("error", None, str(exc) if isinstance(exc, (ValueError, TimeoutError))
                        else "Cannot read local verification input or run slsa-verifier.")

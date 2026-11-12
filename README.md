@@ -173,8 +173,12 @@ Only run this broader evaluation when requested. Explicit local directories,
 lockfiles/SPDX files, GitHub repositories with optional `@ref`, versioned purls,
 `package@version --ecosystem <ecosystem>`, and OCI `@sha256:` references have
 distinct target identities. A package coordinate or supplied image digest is
-**not** proof that its bytes were fetched or scanned: remote acquisition and
-package/image scanning remain unsupported by the source-scan adapter.
+**not** proof that its bytes were fetched or scanned. Without `--acquire-remote`,
+remote targets are not downloaded or submitted to the new package-query path.
+With that explicit option, the runner can inspect a bounded public GitHub
+commit archive, query OSV for one exact package version, or invoke an installed
+OSV image scanner for a `ghcr.io`/`docker.io` digest. These are different evidence
+scopes, not interchangeable proofs of artifact safety.
 Check the report for unknown,
 failed, or unsupported probes and corroborate externally before relying on a
 verdict. The suite does **not** need to run to produce one useful advisor action.
@@ -185,13 +189,55 @@ verdict. The suite does **not** need to run to produce one useful advisor action
 |------------|---------------|--------------------------------------|
 | Local inventory and SECURITY.md/threat-model guidance | Implemented; stdlib inventory plus bundled templates | Python 3 for the detector; none for manual guidance |
 | Scorecard, OSV and Gitleaks via audit runner | Structured Scorecard checks/revision gaps; local source or supported file OSV scans; redacted secrets scanning | No |
-| Local repository metadata / CODEOWNERS | Partial indicators, not verified review enforcement | No |
+| Local repository metadata / CODEOWNERS | Recency context; CODEOWNERS alone is an unscored indicator, not enforced review | No |
 | Local signature/provenance and SPDX evidence | Opt-in `--artifact-evidence`; established optional verifiers, explicit identities/digests, SPDX JSON 2.3 quality/scope; no automatic SLSA level or completeness claim | No |
 | Baseline conformance | Optional `--baseline-evidence`; canonical versioned L1-L3 IDs and manual applicability, separate from numeric risk | No |
 | Malicious-package/reachability/VEX context | Package-scoped advisory facts and optional `--vex-evidence`; no blind suppression or inferred issuer authentication | No |
-| Threat coverage and effective forge controls | Manual evidence; local indicators do not prove enforcement | No |
+| Effective forge controls and activity | Optional read-only `--fetch-governance` or imported `--governance-evidence`; exact-branch rules, bypass/permission gaps, stable release and support context | No |
+| Reviewed threat-model scope | Optional `--threat-evidence` records reviewed areas/assets/boundaries; no whole-project coverage inferred | No |
 | Manual evidence and offline replay | Versioned, target-bound observations and snapshots; imported claims are not independently verified | No |
-| Remote repositories, packages, OCI images | Explicit reference/coordinate identity only; no automatic cloning, installation, image pulling, or artifact verification | No |
+| Remote repositories, packages, OCI images | Opt-in `--acquire-remote`; public commit archives, exact-version OSV queries, and supported digest-only image scans; no project build/install/container execution | No |
+
+### Optional remote and governance evidence
+
+Choose one additional source only when it answers the decision at hand:
+
+```bash
+# Exact-version advisories only: does not download the package or scan its dependencies
+python3 <installed-skill>/scripts/ensemble-eval.py \
+  --target requests@2.31.0 --ecosystem PyPI --mode consume --acquire-remote
+
+# Public source snapshot at a resolved commit: no checkout hooks, builds, or submodules
+python3 <installed-skill>/scripts/ensemble-eval.py \
+  --target owner/repository@main --mode consume --acquire-remote
+
+# Read-only settings and release/activity evidence using existing gh access
+python3 <installed-skill>/scripts/ensemble-eval.py \
+  --target owner/repository --mode produce --fetch-governance
+```
+
+GitHub archive downloads and OSV API queries use fixed public HTTPS endpoints
+without sending GitHub credentials. Archive extraction and scanner output are
+bounded; unsupported entries and incomplete/error responses do not become clean
+results. Remote source/image scanner execution currently requires a POSIX host.
+Image scans require an explicitly named `ghcr.io` or `docker.io` SHA-256 reference,
+an installed OSV scanner, and an already running Docker daemon; the evaluator
+does not start Docker or run the image. Package API queries do not establish
+package-content integrity, absence of malicious code, or dependency closure.
+
+`--fetch-governance` is separate from target acquisition and uses read-only `gh`
+requests. It does not enable features or change permissions. Missing API access,
+unknown bypass actors, and incomplete pagination remain gaps; do not grant broad
+administrator access just to improve a score. `--governance-evidence` and
+`--threat-evidence` accept optional target-bound offline observations instead.
+Live settings cannot be backdated with `--at`: capture them now and replay the
+snapshot later. Local commit/push ages use the selected evaluation time.
+
+See the [audit runtime guide](skills/audit/SKILL.md#optional-remote-and-project-evidence)
+for supported scope, limits, and input formats. These switches are not a global
+network-off control: existing selected audit tools may already contact their
+configured services. Use local inventory or direct advisor guidance when no
+broader assessment is needed.
 
 Custom risk **policy v2** removes Baseline from numeric scoring and renormalizes
 the other weights without changing their relative importance. Previous

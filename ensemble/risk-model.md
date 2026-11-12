@@ -46,13 +46,13 @@ inventory, manual review, or immediate remediation.
 | Signal | Source tool(s) | Normalization |
 |--------|----------------|---------------|
 | `scorecard` | OpenSSF Scorecard | Preserve the upstream aggregate as context; score 10 times the mean of available non-overlapping checks. Consume excludes Vulnerabilities, Maintained, Signed-Releases, and Pinned-Dependencies; produce excludes Vulnerabilities, Code-Review, Branch-Protection, and Signed-Releases. Omitted/unavailable checks, missing revision/time, revision mismatch, dirty working trees, and observations older than 90 days remain unscored gaps. This is a separate custom heuristic, not the upstream aggregate. |
-| `known_vulns` | OSV-Scanner for local source | Start at 100. Subtract 40 per CRITICAL, 20 per HIGH, 8 per MEDIUM, 2 per LOW, 0 per NONE (CVSS 0) **advisory group per affected package/version**. Floor at 0. A documented fixed version doubles that finding's deduction. Unknown severity prevents a scored clean result. Numeric CVSS 0–10 and explicit advisory severity buckets are supported; optional `cvss==3.6` calculates CVSS2/3/4 vectors (base score only) in an isolated interpreter. Missing extra, malformed/unsupported vectors, and contradictory uncomputable vectors remain unknown, not MEDIUM. When computed and explicit buckets conflict, retain the higher severity; an independently supported CRITICAL fact still triggers its cap even if another severity entry is unresolved. |
+| `known_vulns` | OSV-Scanner or explicit exact-version OSV API query | Start at 100. Subtract 40 per CRITICAL, 20 per HIGH, 8 per MEDIUM, 2 per LOW, 0 per NONE (CVSS 0) **advisory group per affected package/version**. Floor at 0. A documented fixed version doubles that finding's deduction. Unknown severity prevents a scored clean result. Numeric CVSS 0–10 and explicit advisory severity buckets are supported; optional `cvss==3.6` calculates CVSS2/3/4 vectors (base score only) in an isolated interpreter. Missing extra, malformed/unsupported vectors, and contradictory uncomputable vectors remain unknown, not MEDIUM. When computed and explicit buckets conflict, retain the higher severity; an independently supported CRITICAL fact still triggers its cap even if another severity entry is unresolved. API-only lookup remains medium confidence and does not establish package-content integrity or dependency closure. |
 | `maintenance` | Repo metadata | Full policy: 100 if released ≤3mo AND ≥2 active maintainers. −25 if last release 3–12mo; −50 if >12mo; −25 if bus factor = 1; −100 if archived/EOL (floor 0). Current runner only has a *low/medium-confidence commit/push recency proxy* (100 ≤90d, 75 ≤365d, 50 older, or 0 archived). It must not claim release cadence or maintainer count from a push. |
 | `supply_chain` | SBOM + transitive analysis | 100 minus 5 per direct dependency with its own CRITICAL/HIGH CVE, minus 2 per deep (transitive) one. Floor 0. Pinned + lockfile present adds +10 (cap 100). |
 | `provenance` | SLSA level, Sigstore/Cosign verify | SLSA L3=100, L2=70, L1=40, L0/none=10. +0 but flips `signing_verified` flag used by escalation rules. |
 | `secrets` | Gitleaks | 100 if history (when git available) and working directory both clean. Potential regex finding → 50 pending verification; a separately *verified live* secret → 0 (and triggers CRITICAL escalation). Never include secret bytes in reports. |
 | `threat_coverage` | STRIDE threat model (PRODUCE only) | 100 if current model exists covering trust boundaries; 50 if partial/stale; 0 if none. |
-| `code_review` | Branch protection + review signal | 100 if required reviews + protected default branch; 50 if partial; 0 if direct pushes allowed. |
+| `code_review` | Effective branch protection + review evidence | 100 if confirmed required reviews + protected primary branch; 50 if exactly one predicate is established true and the other established false; 0 if both are established false. Incomplete visibility, bypass ambiguity, or different branch scope remains unknown/unscored. Imported settings are low-confidence observations; CODEOWNERS alone is not enforcement evidence and is unscored. |
 
 If a tool emits richer detail, prefer it — these are floors, not ceilings.
 
@@ -68,6 +68,21 @@ malicious-package assertions, and reachability/VEX context. Withdrawn records
 are retained as context, not scored. A malicious advisory identifier is not
 proof of compromise. Imported VEX author allowlists do not authenticate the
 document; no imported not-affected statement automatically suppresses findings.
+
+Optional `project_evidence` preserves live or imported exact-branch settings,
+release/support/maintainer facts, and reviewed threat-model areas. These facts
+do not manufacture release cadence, bus factor, or whole-project coverage from
+activity, contributor counts, or a filename. Maintenance recency calculations
+use `evaluated_at`, not wall-clock time; the existing recency proxy remains
+explicitly limited. An archive flag or manually reviewed EOL declaration can
+support a zero maintenance score, but consumer criticality is still required
+for its escalation. Richer partial threat-area evidence stays unscored instead
+of being promoted to project-wide coverage.
+
+Explicit remote acquisition records actual capture time. Evidence more than
+five minutes in the future or older than 90 days relative to `--at` remains
+unscored, with the supplied scope visible. Replay preserves the captured
+observations and does not refresh services or authenticate an imported snapshot.
 
 ---
 

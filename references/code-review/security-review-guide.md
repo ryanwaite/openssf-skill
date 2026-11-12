@@ -434,3 +434,53 @@ MyClass obj = mapper.readValue(jsonString, MyClass.class);
 - [CWE Top 25](https://cwe.mitre.org/top25/)
 - [OWASP Code Review Guide](https://owasp.org/www-project-code-review-guide/)
 - [Secure Coding Guidelines](https://best.openssf.org/)
+
+## Read-only repository governance evidence
+
+`scripts/project_governance.py` exposes `governance_evidence(identity, evaluated_at,
+snapshot=...)` for a resolved GitHub repository and a literal branch. Repository
+identity need not have an independently verified source commit: settings describe
+the current branch, not content authenticity. An explicit
+`request=callable` instead of `snapshot` opts into live read-only GitHub REST
+requests; importing or evaluating a snapshot never fetches anything. The
+callable accepts a relative `/repos/{owner}/{repo}/...` path and returns
+`{"status": 200, "data": ..., "next": false}` (`next` is required on
+paginated pages). It must not issue write requests or follow arbitrary hosts.
+For live requests, pass `evaluated_at=None` to record the actual capture and
+evaluation time after all reads finish. Offline snapshots require an explicit
+timezone-aware evaluation time; a supplied historical time cannot backdate a
+live read.
+The branch rules endpoint `/rules/branches/{branch}` selects active rules
+actually applying to that branch, including organization rules. Rulesets with
+`evaluate` or `disabled` enforcement are inventory context, not effective
+controls. Inaccessible protection and incomplete pagination remain gaps, not
+proof that reviews are required or absent. A CODEOWNERS file is only context;
+record required approvals, last-push approval, dismissals, code-owner review,
+and bypass actors separately. Captures describe **current** branch settings,
+not a historical source commit.
+
+Offline snapshots use these required top-level keys (additional API response
+fields are allowed within `data`). Here is a deliberately incomplete but
+valid example with no automatic protection claim:
+
+```json
+{
+  "schema_version": 1,
+  "target": "github.com/example/demo",
+  "revision": "main",
+  "branch": "main",
+  "captured_at": "2026-11-12T00:00:00Z",
+  "repository_metadata": {"status": 200, "data": {"full_name": "example/demo", "default_branch": "main"}},
+  "branch_info": {"status": 200, "data": {"name": "main", "protected": false}},
+  "branch_protection": {"status": 403},
+  "effective_rules": [{"status": 200, "data": [], "next": false}],
+  "rulesets": [{"status": 403}],
+  "ruleset_details": {}
+}
+```
+
+`ruleset_details` maps each effective rule's `ruleset_id` (string key) to its
+read-only ruleset response, including `enforcement` and `bypass_actors`; a
+missing detail leaves bypass semantics uncertain. A 404 can also mean
+insufficient visibility. This evidence is not a request for admin permissions
+or a prompt to modify repository settings.
