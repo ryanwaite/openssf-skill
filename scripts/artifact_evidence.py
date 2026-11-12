@@ -347,7 +347,8 @@ def _identity(value):
     return value
 
 
-def ingest_spdx(spdx_path, scope, *, subject_sha256=None, expected_sha256=None):
+def ingest_spdx(spdx_path, scope, *, subject_sha256=None, expected_sha256=None,
+                validate_schema=False):
     """Inventory SPDX JSON 2.3 without claiming vulnerability or release coverage.
 
     A subject digest is only bound if a document-described element records the
@@ -359,6 +360,15 @@ def ingest_spdx(spdx_path, scope, *, subject_sha256=None, expected_sha256=None):
         document = _json_file(spdx_path)
         if not isinstance(document, dict) or document.get("spdxVersion") != "SPDX-2.3":
             raise ValueError("Only SPDX JSON 2.3 is supported.")
+        if type(validate_schema) is not bool:
+            raise ValueError("validate_schema must be boolean.")
+        schema_validation = None
+        if validate_schema:
+            from spdx_validation import validate_spdx
+            schema_validation = validate_spdx(document)
+            if schema_validation["status"] in ("invalid", "error"):
+                return _result("error", {"schema_validation": schema_validation},
+                               schema_validation["reason"])
         doc_id = document.get("SPDXID")
         namespace = document.get("documentNamespace")
         if doc_id != "SPDXRef-DOCUMENT" or not isinstance(namespace, str) or \
@@ -446,6 +456,8 @@ def ingest_spdx(spdx_path, scope, *, subject_sha256=None, expected_sha256=None):
                     bound = True
                     break
         gaps = []
+        if schema_validation and schema_validation["status"] != "valid":
+            gaps.append(schema_validation["reason"])
         missing_versions = sum(not p["version"] for p in inventory)
         missing_purls = sum(not p["purls"] for p in inventory)
         dependency_count = sum(e["type"] in ("DEPENDS_ON", "DEPENDENCY_OF") for e in edges)
@@ -478,6 +490,7 @@ def ingest_spdx(spdx_path, scope, *, subject_sha256=None, expected_sha256=None):
                  "subject_sha256": subject, "subject_bound": bound,
                  "binding_type": "declared_checksum_only" if bound else "none",
                  "independent_digest_match": bool(expected and bound),
+                 "described_ids": sorted(set(described)),
                  "packages": inventory, "relationships": edges,
                  "quality": {"package_count": len(inventory),
                              "missing_version_count": missing_versions,
@@ -485,8 +498,11 @@ def ingest_spdx(spdx_path, scope, *, subject_sha256=None, expected_sha256=None):
                              "dependency_relationship_count": dependency_count,
                              "disconnected_package_count": disconnected,
                              "described_element_count": len(set(described)),
-                             "schema_validated": False,
+                             "schema_validated": bool(schema_validation and
+                                                      schema_validation["status"] == "valid"),
                              "completeness": "unknown"}}
+        if schema_validation:
+            facts["schema_validation"] = schema_validation
         return _result("partial" if gaps else "ok", facts, *gaps)
     except (ValueError, OSError) as exc:
         return _result("error", None, str(exc) if isinstance(exc, ValueError)

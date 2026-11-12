@@ -191,6 +191,9 @@ verdict. The suite does **not** need to run to produce one useful advisor action
 | Scorecard, OSV and Gitleaks via audit runner | Structured Scorecard checks/revision gaps; local source or supported file OSV scans; redacted secrets scanning | No |
 | Local repository metadata / CODEOWNERS | Recency context; CODEOWNERS alone is an unscored indicator, not enforced review | No |
 | Local signature/provenance and SPDX evidence | Opt-in `--artifact-evidence`; established optional verifiers, explicit identities/digests, SPDX JSON 2.3 quality/scope; no automatic SLSA level or completeness claim | No |
+| Local SBOM generation and dependency context | Optional Syft generation on existing local artifacts/source; optional official SPDX 2.3 schema validation; exact advisory-to-inventory paths, not a second risk score | No |
+| Security Insights | Explicit `--security-insights` local file/directory; released-schema checks and bounded maintainer self-report, not verified controls | No |
+| npm/PyPI attestation metadata | Explicit `--registry-evidence` on an exact package version; distribution digests and attestation discovery, **not** cryptographic verification | No |
 | Baseline conformance | Optional `--baseline-evidence`; canonical versioned L1-L3 IDs and manual applicability, separate from numeric risk | No |
 | Malicious-package/reachability/VEX context | Package-scoped advisory facts and optional `--vex-evidence`; no blind suppression or inferred issuer authentication | No |
 | Effective forge controls and activity | Optional read-only `--fetch-governance` or imported `--governance-evidence`; exact-branch rules, bypass/permission gaps, stable release and support context | No |
@@ -238,6 +241,43 @@ for supported scope, limits, and input formats. These switches are not a global
 network-off control: existing selected audit tools may already contact their
 configured services. Use local inventory or direct advisor guidance when no
 broader assessment is needed.
+
+### Optional inventory and metadata
+
+The existing artifact configuration can select an existing SPDX document or
+ask an installed Syft to generate one. For example, a source-directory target
+can use `"sbom": {"generate": true, "scope": "source_checkout"}`. Use
+`build_output` with an independently expected artifact SHA-256 for a released
+file. Nothing is built, installed, signed, or published. Add
+`"validate_schema": true` only when official SPDX schema validation is needed;
+its pinned optional Python requirements are in `skills/audit/requirements-sbom.txt`.
+Missing generator/validator tools produce targeted gaps, not a prerequisite
+checklist for the advisor.
+
+```bash
+# Inspect a local maintainer report; no URL inheritance or remote evidence is fetched
+python3 <installed-skill>/scripts/ensemble-eval.py \
+  --target ./project --mode produce --security-insights ./project
+
+# Explicit public registry metadata only; no package download, install, or signature verification
+python3 <installed-skill>/scripts/ensemble-eval.py \
+  --target sampleproject@4.0.0 --ecosystem PyPI --mode consume --registry-evidence
+```
+
+Security Insights JSON is dependency-free; YAML parsing and full CUE schema
+validation are optional. Claims stay labeled self-report even when their format
+is valid. Registry discovery is separate from OSV advisory queries and requires
+its own explicit flag. `status: ok` means metadata discovery completed,
+**not** that a signature was verified; `verification: not_verified` remains
+explicit. The optional `--registry-digests` input compares independently
+supplied per-distribution expectations, not package bytes downloaded by this
+tool. Live discovery cannot be backdated with `--at`; snapshots replay the
+captured facts without another registry request.
+
+See the [inventory/metadata input guide](skills/audit/SKILL.md#optional-inventory-and-maintainer-metadata)
+for complete examples and dependency choices. Existing vulnerability findings
+may be correlated with declared inventory paths, but they are not rescored or
+suppressed, and missing matches never establish safety.
 
 Custom risk **policy v2** removes Baseline from numeric scoring and renormalizes
 the other weights without changing their relative importance. Previous

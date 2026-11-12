@@ -1,6 +1,7 @@
 """Smoke-test the documented full-skill layout in disposable destinations."""
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -16,6 +17,10 @@ ASSETS = (
     'references/security-policies/security-md-guide.md',
     'templates/SECURITY.md.template', 'workflows/scorecard.yml.template',
     'ensemble/risk-model.md',
+    'scripts/sbom_analysis.py', 'scripts/spdx_validation.py',
+    'scripts/security_insights.py', 'scripts/registry_evidence.py',
+    'references/sbom/spdx-2.3.schema.json',
+    'references/security-insights/schema-v2.2.0.cue',
 )
 
 
@@ -48,6 +53,14 @@ class TestSkillPackage(unittest.TestCase):
                     result = json.loads(run.stdout)
                     self.assertIn('python', [item['language'] for item in result['languages']])
                     self.assertEqual(result['project_path'], str(target))
+                    audit = subprocess.run(
+                        [sys.executable, '-S', str(location / 'scripts/ensemble-eval.py'),
+                         '--target', str(target), '--mode', 'produce'],
+                        cwd=target, env={**os.environ, 'PATH': ''},
+                        capture_output=True, text=True, check=True)
+                    report = json.loads(audit.stdout)
+                    self.assertEqual(report['verdict']['outcome'], 'INCOMPLETE')
+                    self.assertTrue(report['actions'])
 
     def test_instructions_only_does_not_install_skill_assets(self):
         with tempfile.TemporaryDirectory() as temp:

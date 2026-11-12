@@ -339,6 +339,132 @@ Online OSV service access was also DNS-blocked; actual scanner JSON shapes
 were checked against an isolated **synthetic** offline database. These are
 compatibility boundaries, not findings about the scanned packages.
 
+### Optional inventory and maintainer metadata
+
+These features add contextual observations, not weights or new prerequisites.
+Missing optional tools never block local inventory, manual review, or known
+critical remediation.
+
+**Generate one local SPDX SBOM.** The artifact input's `sbom` object accepts
+exactly one `path` or `generate: true`. For an already-built release:
+
+```json
+{
+  "schema_version": 1,
+  "target": "./dist/release.tgz",
+  "artifact": {
+    "path": "dist/release.tgz",
+    "sha256": "<independently expected 64-character SHA-256>"
+  },
+  "sbom": {
+    "generate": true,
+    "scope": "build_output",
+    "validate_schema": true
+  }
+}
+```
+
+Paths are relative to the configuration file. For `source_checkout`, use a
+local-directory target; no artifact digest or separate `subject_sha256` is
+appropriate for source generation. Generation currently supports only explicit
+local files/directories on POSIX, not image pulls. It calls an installed Syft
+with SPDX JSON 2.3 output, isolated configuration and disabled update/remote
+enrichment options. Credentials and target configuration are not inherited.
+This is not kernel-enforced network isolation. Time/output/tree traversal are
+bounded; source/digest changes during generation reject the result. Private
+temporary output is removed; the returned report preserves extracted facts,
+not a published SBOM file. For publishing, use the separate release workflow.
+
+`validate_schema` defaults to false. When explicitly true, it uses the pinned
+official SPDX 2.3 JSON schema and optional `jsonschema==4.25.1` in an isolated
+Python interpreter. Install its pinned requirements only if needed:
+
+```bash
+python3 -m pip install -r <installed-skill>/skills/audit/requirements-sbom.txt
+```
+
+No schema references are fetched at runtime. Missing validation packages remain
+unknown; invalid structure is an error. Format validation does not establish
+all semantic consistency, inventory truth, completeness, or downstream
+acceptance. The original schema source, digest and license are documented in
+the [SBOM guide](../../references/sbom/tools-by-language.md).
+
+When known-vulnerability evidence already exists, `supply_chain_analysis`
+matches its exact ecosystem/name/version/purl identities to the inventory.
+Paths distinguish described subjects, declared containment, direct/transitive
+dependencies, and disconnected components. They do **not** establish code
+execution or exploitability. Ambiguity and missing matches are explicit;
+no advisory is suppressed or deducted twice, and `score_adjustment` is null.
+The existing weighted supply-chain signal is not automatically satisfied by
+an incomplete graph or a schema-valid SBOM.
+
+**Read local Security Insights.** `--security-insights <file-or-directory>`
+selects one local document or searches the root/`.github/` standard filenames.
+Multiple candidates require explicit selection. JSON works with the standard
+library; YAML requires the optional pinned parser:
+
+```bash
+python3 -m pip install -r <installed-skill>/skills/audit/requirements-metadata.txt
+```
+
+The reader rejects duplicate keys, YAML tags/anchors/aliases, oversized input,
+unsupported/development schema versions, unsafe credential-bearing URLs, and
+conflicting project/repository scope. It records document digest, available
+target revision, capture/review/update dates, scope and bounded claims without
+copying entire maintainer contact lists. Dates more than 365 days old, future
+dates, and review-before-update produce contextual freshness gaps, not a risk
+grade. Inheritance and evidence links are **not fetched**.
+
+Optional installed CUE (tested v0.14.2) validates against a byte-pinned copy of
+the released v2.2.0 schema; no target-supplied schema is executed. The validator
+uses isolated environment/configuration, no stdin and `CUE_REGISTRY=none`.
+Without CUE, `schema_validation` remains unknown. Even valid documents are
+`self_report`, never independent verification or Baseline credit. An unmatched
+or unavailable repository scope cannot become a verified control.
+
+**Discover public registry attestations.** `--registry-evidence` operates only
+on an exact npm/PyPI package target. It contacts official `registry.npmjs.org`
+or `pypi.org` endpoints, with no inherited proxy credentials, cookies, redirect
+following, package download, installation or publishing. It inspects npm
+distribution integrity/attestation metadata and individual PyPI wheel/sdist
+digests plus PEP 740 Integrity API responses. Results are per distribution,
+not a blanket claim for a version with several files.
+
+Requests have bounded response size and elapsed-read time, a 20-second
+discovery budget checked between requests, and at most 12 PyPI distributions.
+Missing/yanked/malformed/mismatched evidence stays visible; larger releases
+are not silently truncated. Publisher/source values and signed-statement
+contents remain unverified claims. A completed discovery may have `status: ok`
+while **always** retaining `verification: not_verified`.
+
+Optional independently obtained expected digests use
+`--registry-digests expected.json` together with `--registry-evidence`:
+
+```json
+{
+  "schema_version": 1,
+  "target": "sampleproject@4.0.0",
+  "expected_digests": {
+    "sampleproject-4.0.0-py3-none-any.whl": "sha256:<independently expected 64-character digest>"
+  }
+}
+```
+
+Digest association compares expectations with registry metadata, not downloaded
+package bytes. It neither authenticates the attestation nor establishes an
+expected signer. No SLSA level or risk score is inferred. The lower-level API's
+injected request function is for controlled callers/tests; CLI network access
+requires the explicit flag. `--at` is rejected with live registry discovery;
+capture current metadata and replay its snapshot instead.
+
+The report preserves `security_insights`, `registry_evidence`, and
+`supply_chain_analysis` through JSON/Markdown and offline replay. These sections
+do not change custom policy v2. Live development checks used published npm/PyPI
+metadata and synthetic local Syft inventories; cryptographic registry-attestation
+verification remains separate. Public TUF and OSV DNS remained unavailable on
+the development host; no alternate untrusted endpoint or verification bypass
+was used.
+
 ### Step 3 — Fuse signals into a weighted verdict
 Apply **`ensemble/risk-model.md`** exactly:
 1. Normalize each signal to a 0–100 sub-score.
