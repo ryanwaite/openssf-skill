@@ -29,6 +29,16 @@
       ],
       "source": "https://github.com/google/osv-scanner-action/releases/tag/v2.7.0",
       "note": "The CLI's v2.7.1 release does not imply an action v2.7.1 tag."
+    },
+    "osv_source_json_contract": {
+      "version": "v2.7.1",
+      "checked_on": "2026-11-12",
+      "binary_sha256": "fb7dab19a8bd9bbe5c3189f09d4b7ee1820c9553a23bac202648a56efd2f6ee8",
+      "source": "https://github.com/google/osv-scanner/releases/tag/v2.7.1",
+      "validation": "Actual Linux binary, isolated requirements fixture and synthetic local OSV database; no project dependencies installed.",
+      "findings": "Exit 1 retains package identity, advisory groups, affected-package records and CVSS vectors.",
+      "no_findings": "Exit 0 defaults to an empty results array; --all-packages retains package identities but omits their vulnerabilities field.",
+      "network_limit": "Online scan exited 127 because api.osv.dev/deps.dev could not resolve from the validation host; offline output-shape checks do not establish live service availability."
     }
   },
   "reference_workflows": {
