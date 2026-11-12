@@ -216,3 +216,42 @@ For efficiency, apply STRIDE based on element type (not all threats apply to all
 - [OWASP Threat Modeling](https://owasp.org/www-community/Threat_Modeling)
 - [OWASP Threat Modeling Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Threat_Modeling_Cheat_Sheet.html)
 - [Adam Shostack's Threat Modeling Book](https://shostack.org/books/threat-modeling-book)
+
+## Start with one reviewed area
+
+`scripts/project_governance.py` exposes `threat_evidence(identity, evaluated_at,
+evidence)` to record a reviewed area without requiring scanners, a GitHub
+account, or complete project-wide modeling. For a local target, bind `target`
+to the explicitly requested local path and declare the revision being
+reviewed (such as `reviewed-working-copy` if no immutable commit is
+available). Such a declaration is **not** independently verified. For a
+verified GitHub target, bind the requested repo and known revision exactly.
+
+```json
+{
+  "schema_version": 1,
+  "target": "./project",
+  "revision": "reviewed-working-copy",
+  "captured_at": "2026-11-12T00:00:00Z",
+  "areas": [{
+    "scope": "login and session establishment only",
+    "source": "security review meeting notes",
+    "reference": "review-123",
+    "reviewed_at": "2026-11-11T00:00:00Z",
+    "reviewer": "reviewer name",
+    "evidence_type": "manual_observation",
+    "coverage": "partial",
+    "assets": ["session tokens"],
+    "trust_boundaries": ["untrusted login input into the authentication service"],
+    "limitations": ["password recovery was not reviewed"]
+  }]
+}
+```
+
+Use `coverage: current`, `partial`, or `none` for the **named scope**, not the
+whole project. Include the assets and trust boundaries for a current review;
+record uncovered flows under limitations and review them next. Use
+`evidence_type: self_report` when review was asserted by the project rather
+than independently observed. References and reviewer names are contextual
+claims, not proof of adequacy or independent authentication; a filename
+containing "threat model" never establishes coverage.
