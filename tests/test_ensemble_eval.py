@@ -2,6 +2,7 @@
 
 import importlib.util
 from contextlib import redirect_stdout
+import gzip
 from io import BytesIO, StringIO
 import json
 import os
@@ -702,6 +703,11 @@ class TestAdapters(unittest.TestCase):
                         with ra.acquire_repository(identity):
                             self.fail("Invalid archive was accepted")
                 self.assertFalse(seen[0].exists())
+        with tempfile.TemporaryDirectory() as directory, \
+                patch.object(ra, "MAX_TAR_BYTES", 1024):
+            with self.assertRaisesRegex(ra.RemoteAcquisitionError,
+                                        "decompression size limit"):
+                ra._extract(gzip.compress(b"\0" * 2048), Path(directory))
 
     def test_old_gh_push_is_not_reported_as_recent(self):
         with patch.object(ee, "_have", return_value=True), \

@@ -2,6 +2,7 @@
 
 from contextlib import contextmanager
 from datetime import datetime, timezone
+import gzip
 from io import BytesIO
 import json
 from pathlib import Path, PurePosixPath
@@ -15,6 +16,7 @@ from urllib import error, parse, request
 MAX_RESPONSE = 8 * 1024 * 1024
 MAX_ARCHIVE = 16 * 1024 * 1024
 MAX_EXTRACTED = 64 * 1024 * 1024
+MAX_TAR_BYTES = MAX_EXTRACTED + 8 * 1024 * 1024
 MAX_FILE = 8 * 1024 * 1024
 MAX_FILES = 2000
 MAX_ENTRIES = 4000
@@ -97,7 +99,20 @@ def _extract(raw, dest):
     seen = {}
     files = total = entries = 0
     try:
-        with tarfile.open(fileobj=BytesIO(raw), mode="r:gz") as archive:
+        chunks = []
+        tar_bytes = 0
+        with gzip.GzipFile(fileobj=BytesIO(raw)) as compressed:
+            while True:
+                if time.monotonic() - start > 20:
+                    raise RemoteAcquisitionError("Archive extraction exceeded its time limit")
+                chunk = compressed.read(min(65536, MAX_TAR_BYTES + 1 - tar_bytes))
+                tar_bytes += len(chunk)
+                if tar_bytes > MAX_TAR_BYTES:
+                    raise RemoteAcquisitionError("Archive exceeds the decompression size limit")
+                if not chunk:
+                    break
+                chunks.append(chunk)
+        with tarfile.open(fileobj=BytesIO(b"".join(chunks)), mode="r:") as archive:
             root = None
             for entry in archive:
                 entries += 1
