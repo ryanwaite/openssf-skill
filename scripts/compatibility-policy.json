@@ -72,6 +72,24 @@
       "unresolvable": ["tuf-repo-cdn.sigstore.dev", "api.osv.dev"],
       "limitation": "DNS recheck only; no endpoint substitution or trust bypass. Earlier public TUF and online OSV live-validation blockers remain."
     },
+    "fifth_wave_network_recheck": {
+      "checked_on": "2026-11-13",
+      "resolvable": ["registry.npmjs.org", "pypi.org", "github.com"],
+      "unresolvable": ["tuf-repo-cdn.sigstore.dev", "api.osv.dev"],
+      "limitation": "Ordinary host DNS remains unavailable for public TUF and OSV. No alternate trust endpoint, insecure flag, or trust-root bootstrapping claim is introduced."
+    },
+    "inventory_interoperability_contract": {
+      "checked_on": "2026-11-13",
+      "generator": "Syft v1.57.1",
+      "consumer": "OSV-Scanner v2.7.1",
+      "schema_validator": "jsonschema==4.25.1 with pinned official SPDX 2.3 schema",
+      "source_fixtures": ["npm lockfile", "Python requirements", "Go module", "Maven POM"],
+      "identity_findings": "Actual generator output includes encoded scoped npm purls, canonicalized PyPI names, slash-containing Go module purls and artifact-only Maven display names with group/artifact purls.",
+      "spdx_2_3_result": "Synthetic source inventories passed official schema validation, local ingestion and graph correlation; OSV extracted all four ecosystem identities.",
+      "vulnerability_matching_limit": "Only the cached synthetic PyPI advisory database completed offline vulnerability matching; npm/Go/Maven extraction with missing databases exited 127, not a clean result.",
+      "binary_inventory_limit": "Synthetic local wheel and JAR scans yielded schema-valid root-only inventories without identified third-party packages; completeness is not inferred.",
+      "spdx_3_result": "Syft SPDX 3.0.1 JSON-LD output is rejected by the current local reader and OSV 2.7.1 SPDX extractor. Regenerate SPDX 2.3 for these consumers; do not relabel or silently convert."
+    },
     "local_inventory_and_schema_contract": {
       "checked_on": "2026-11-12",
       "syft_version": "v1.57.1",

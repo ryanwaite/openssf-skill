@@ -290,8 +290,31 @@ def generate_sbom(target_path, scope, *, expected_sha256=None, validate_schema=F
             workspace.cleanup()
 
 
+def _purl_identity(raw):
+    """Parse only unqualified, versioned package URLs for exact correlation."""
+    if not isinstance(raw, str) or "?" in raw or "#" in raw or \
+            re.search(r"%(?![0-9a-fA-F]{2})", raw):
+        return None
+    match = re.fullmatch(r"pkg:([a-z][a-z0-9.+-]*)/(.+)@([^@]+)", raw)
+    if not match:
+        return None
+    try:
+        name, version = (unquote(value, errors="strict") for value in match.group(2, 3))
+    except UnicodeError:
+        return None
+    if not name or not version:
+        return None
+    return match.group(1), name, version
+
+
+def _pypi_name(name):
+    if not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?", name):
+        return None
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
 def _package_identity(package, finding):
-    """Match only versioned purls in supported namespaces, never fuzzy names."""
+    """Match a unique versioned purl and its ecosystem-specific display name."""
     if not isinstance(package, dict) or not isinstance(finding, dict):
         return False
     ecosystem = finding.get("ecosystem")
@@ -302,18 +325,26 @@ def _package_identity(package, finding):
     expected_type = _ECOSYSTEMS.get(ecosystem)
     if not expected_type or package.get("version") != version:
         return False
-    if package.get("name") != name:
+    purls = package.get("purls")
+    if not isinstance(purls, list) or not purls or any(not isinstance(p, str) for p in purls) \
+            or len(set(purls)) != 1:
         return False
-    expected_name = name.replace(":", "/", 1) if ecosystem == "Maven" else name
-    matches = set()
-    for raw in package.get("purls", []):
-        if not isinstance(raw, str) or not raw.startswith("pkg:") or "@" not in raw:
-            continue
-        base, tail = raw.rsplit("@", 1)
-        if (unquote(base) == "pkg:" + expected_type + "/" + expected_name and
-                unquote(tail.split("?", 1)[0].split("#", 1)[0]) == version):
-            matches.add(raw)
-    return bool(matches)
+    parsed = _purl_identity(purls[0])
+    if not parsed or parsed[0] != expected_type or parsed[2] != version:
+        return False
+    display = package.get("name")
+    if not isinstance(display, str):
+        return False
+    if ecosystem == "Maven":
+        if name.count(":") != 1 or not all(name.split(":")):
+            return False
+        group, artifact = name.split(":")
+        return parsed[1] == group + "/" + artifact and display in (name, artifact)
+    if ecosystem == "PyPI":
+        canonical = _pypi_name(name)
+        return bool(canonical and _pypi_name(parsed[1]) == canonical and
+                    _pypi_name(display) == canonical)
+    return parsed[1] == name == display
 
 
 def _paths(facts):
@@ -440,6 +471,10 @@ def correlate_sbom(sbom_result, known_vulns_signal):
             gaps.append("Described roots unavailable; graph paths cannot be inferred.")
         if unmatched:
             gaps.append("Some known advisories have no exact SPDX package URL/version identity match.")
+        if any(len(set(p["purls"])) > 1 or
+               any(_purl_identity(raw) is None for raw in p["purls"])
+               for p in packages):
+            gaps.append("Multiple unequal or qualified/subpath package URLs cannot be assigned one precise identity.")
         if any(p.get("version") in (None, "") or not p.get("purls") for p in packages):
             gaps.append("Some SPDX packages lack versions or purls; they cannot be precisely matched.")
         if any(m["relation"] == "disconnected" for m in matched):
