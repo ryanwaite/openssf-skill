@@ -80,6 +80,13 @@ not_verified`, distinguish each distribution's digest/attestations, and never
 imply a trusted signer or SLSA level from presence alone. Preserve these captured
 observations during replay without making new network requests.
 
+If explicit local registry verification was requested, report it in a separate
+section per selected distribution. Identify independent expected digest,
+signer/issuer/source policy, input fingerprints, capture time and verifier
+result. Do not overwrite discovery's `not_verified`, award a SLSA level, or
+generalize one verified file to every release artifact. Failed/unknown
+verification remains explicit and actionable.
+
 If remote acquisition was explicitly requested, show resolved commit/version/
 digest, public source, actual fetch time, scope and coverage limits. A commit
 archive has no Git history; an exact-version advisory query is not package

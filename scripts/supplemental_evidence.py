@@ -198,3 +198,72 @@ def registry_digest_input(path, target):
     if not isinstance(data["expected_digests"], dict) or len(data["expected_digests"]) > 32:
         raise ValueError("Registry expected_digests must be a bounded filename map")
     return data["expected_digests"]
+
+
+def registry_verification_input(path, target, identity, *, allow_network_trust=False):
+    """Verify explicitly selected local distributions under independent caller policy."""
+    from registry_verification import verify_registry_distribution
+
+    data = _document(path, target, ("schema_version", "target", "distributions"))
+    if identity.get("kind") != "package" or identity.get("ecosystem") not in ("npm", "PyPI"):
+        raise ValueError("Registry verification requires an exact npm or PyPI package target")
+    distributions = data["distributions"]
+    if not isinstance(distributions, list) or not 1 <= len(distributions) <= 12:
+        raise ValueError("Registry verification needs 1-12 explicitly selected distributions")
+    required = {
+        "filename", "artifact_path", "bundle_path", "expected_digest",
+        "certificate_identity", "certificate_oidc_issuer", "source_repository",
+        "predicate_type",
+    }
+    optional = {"trusted_root_path", "source_ref", "source_path", "builder_id"}
+    parent = Path(path).resolve().parent
+    prepared = []
+    filenames = set()
+    for item in distributions:
+        if not isinstance(item, dict) or not required <= set(item) or \
+                set(item) - required - optional:
+            raise ValueError("Registry verification distribution has missing or unknown policy fields")
+        filename = item["filename"]
+        if not isinstance(filename, str) or not filename or len(filename) > 255 or \
+                filename in filenames:
+            raise ValueError("Registry verification needs unique, bounded distribution filenames")
+        filenames.add(filename)
+        config = dict(item)
+        for field in ("artifact_path", "bundle_path", "trusted_root_path"):
+            if field not in config:
+                continue
+            supplied = config[field]
+            if not isinstance(supplied, str):
+                raise ValueError("Registry verification inputs must name local files")
+            candidate = Path(supplied)
+            candidate = candidate if candidate.is_absolute() else parent / candidate
+            if any(part.is_symlink() for part in (candidate, *candidate.parents)
+                   if part.is_relative_to(parent)):
+                raise ValueError("Registry verification input paths must not contain symlinks")
+            selected = _path(parent, config[field])
+            if not selected.is_relative_to(parent):
+                raise ValueError("Registry verification files must be inside the configuration directory")
+            config[field] = str(selected)
+        prepared.append(config)
+    results = [{"filename": config["filename"], **verify_registry_distribution(
+        identity, config, allow_network_trust=allow_network_trust
+    )} for config in prepared]
+    verified = sum(result["status"] == "ok" and
+                   result["facts"].get("verification") == "verified" for result in results)
+    failed = any(result["status"] == "error" for result in results)
+    return {
+        "status": "error" if failed else "ok" if verified == len(results) else
+                  "partial" if verified else "unknown",
+        "facts": {
+            "verification": "verified" if verified == len(results) else
+                            "partially_verified" if verified else "not_verified",
+            "scope": "explicitly selected local distributions only",
+            "package": {key: identity[key] for key in ("ecosystem", "name", "version", "purl")},
+            "distributions": results,
+            "verified_distribution_count": verified,
+        },
+        "gaps": [
+            "Verification covers only the supplied artifact, signed assertions, and independently chosen policy.",
+            "It does not prove source correctness, vulnerability absence, registry freshness, or a SLSA level.",
+        ],
+    }

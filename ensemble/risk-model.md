@@ -91,6 +91,13 @@ assurance or satisfy a missing scored probe on their own. Correlating an existin
 advisory with an inventory path never creates a second deduction. There is no
 policy-version change for adding these observations; policy v2 remains in effect.
 
+`registry_verification` is a separate optional cryptographic observation for
+explicitly selected local distributions and independent identity/digest policy.
+It does not rewrite registry discovery, establish a SLSA level or source
+correctness, suppress advisories, or alter weights. Failure prioritizes review
+of the selected artifact/policy, not an invented compromise finding. Policy v2
+is unchanged.
+
 ---
 
 ## 3. Mode weights

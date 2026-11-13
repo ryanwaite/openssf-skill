@@ -76,6 +76,100 @@ For enforcement, use a verifier that independently checks the exact artifact,
 signature, trust root, transparency log, and separately configured expected
 signer/issuer; do not derive expected policy from the discovered claims.
 
+### Local npm registry-attestation verification (optional)
+
+`scripts/registry_verification.py` offers
+`verify_registry_distribution(identity, config, *, allow_network_trust=False)`
+for **one exact npm tarball** with a SLSA provenance v1 Sigstore DSSE bundle
+(v0.3). This is separate from discovery and does not fetch or install a
+package. `identity` is an exact-version package target from
+`target_identity.resolve_target(...)`. `config` requires:
+
+- `filename` (e.g. `semver-7.7.3.tgz`), `artifact_path` (already downloaded
+  local tarball), and `bundle_path` (already obtained local Sigstore JSON
+  bundle for **that** tarball);
+- `expected_digest` (`sha512:<128 hex digits>`, independently obtained, not
+  copied from registry metadata), `certificate_identity` (exact Fulcio signer
+  identity), `certificate_oidc_issuer` (exact issuer URL), and
+  `source_repository` (exact expected HTTPS repository URL);
+- `predicate_type: "https://slsa.dev/provenance/v1"`; optionally
+  `source_ref`, `source_path`, and `builder_id` for tighter signed-claim checks;
+- optionally `trusted_root_path` to an **independently validated** Sigstore
+  TrustedRoot JSON. Without this file, the default result is `unknown` and no
+  network trust lookup is attempted. Setting `allow_network_trust=True`
+  explicitly permits Cosign's public Sigstore TUF trust lookup instead.
+
+The verifier requires a locally installed [Cosign 3.1.4](https://github.com/sigstore/cosign/releases/tag/v3.1.4)
+(`cosign verify-blob-attestation`). It compares the local bytes with the
+independently expected digest, checks that the signed statement contains exactly
+the expected package/version, digest, predicate, and source assertions, then
+uses Cosign to verify DSSE signature, Fulcio certificate identity/issuer,
+SCT, transparency-log proof, and digest claim. It does **not** disable those
+checks or infer any policy from registry responses. `ok` denotes verification
+of **that one** distribution only; `facts.signature`, `facts.signer`, and
+`facts.source_assertion` describe distinct checks; `facts.builder_assertion`
+is `authenticated` only if an independently expected `builder_id` matched.
+A source assertion
+authenticated by a signer is not independent proof the source is correct or
+that a SLSA level has been attained. Invalid digest/identity/signature returns
+`error`; missing trust/tool/material or unsupported layout returns `unknown`.
+The function emits no verifier stdout/stderr (which could contain private
+details). It bounds local artifact hashing (256 MiB, 12 seconds), JSON input
+(512 KiB), and the verifier run (18 seconds); larger files remain `unknown`.
+A private, system-temporary 0700 snapshot directory holds read-only copies of
+the exact artifact, bundle, and optional root used for parsing **and** Cosign;
+it is removed on success and failure. Symlinks and special-file inputs are
+rejected. If any original or snapshot changes during verification, no
+affirmative result is issued. This safe file-snapshot path currently requires
+POSIX file APIs; unavailable platform support remains unknown rather than
+breaking basic advice. The target and caller directory need not be writable.
+An `ok` result includes SHA-256 digests of the
+verified snapshots (`facts.snapshot_sha256`), the independently expected
+certificate identity and issuer, and `facts.verifier.captured_at`; the
+executable's exact version is explicitly `unrecorded` (install/check Cosign
+v3.1.4 yourself). These digests identify the verified bytes, not a guarantee
+that a mutable original file will remain unchanged after the call returns.
+A caller that reads policy from disk must confine all paths to its approved
+directory and never use untrusted metadata to fill policy fields.
+
+**PyPI PEP 740** uses a different envelope representation; this Cosign-only
+API explicitly returns `unknown` for PyPI rather than treating an envelope as
+a bundle or claiming verification of a wheel/sdist. Use a PEP 740-aware
+verifier such as the [`pypi-attestations` public API](https://github.com/pypi/pypi-attestations)
+with an independently set identity and trust policy for PyPI. Never promote
+the read-only discovery `not_verified` status based on metadata alone.
+
+Validation example (2026-11-13): `semver-7.8.6.tgz` from
+[`registry.npmjs.org/semver/-/semver-7.8.6.tgz`](https://registry.npmjs.org/semver/-/semver-7.8.6.tgz)
+and its SLSA v1 v0.3 bundle from
+[`/-/npm/v1/attestations/semver@7.8.6`](https://registry.npmjs.org/-/npm/v1/attestations/semver@7.8.6)
+verified `ok` offline with checksum-checked Cosign v3.1.4
+(`sha256:424e2c97d0b45fd7a6b608a87f090f35633f4c23ece5f092d48bba11aaf4bbfa`).
+The separately obtained expected SHA-512 came from the `node_modules/semver`
+entry in [npm/cli's committed lockfile](https://github.com/npm/cli/blob/8f92e740ee1547568779284005454ce2f1a5e58b/package-lock.json);
+the local TrustedRoot came from the
+[Sigstore root-signing repository](https://github.com/sigstore/root-signing/blob/730ca4cf59d1ba36ccc06d9d7064dac508f7608a/targets/trusted_root.json),
+not from package metadata. The expected GitHub Actions signer workflow was
+independently checked in
+[npm/node-semver](https://github.com/npm/node-semver/blob/b37b033b585ad5e575afeccadb426ea41bc6cea4/.github/workflows/release-integration.yml):
+`https://github.com/npm/node-semver/.github/workflows/release-integration.yml@refs/heads/main`;
+the issuer was `https://token.actions.githubusercontent.com` and the
+independent expected source was `https://github.com/npm/node-semver`. The
+signed source-workflow path is `.github/workflows/release.yml`, independently
+checked in the [caller workflow at the same commit](https://github.com/npm/node-semver/blob/b37b033b585ad5e575afeccadb426ea41bc6cea4/.github/workflows/release.yml);
+it is distinct from the reusable signer workflow `release-integration.yml`.
+Do not assume those identities are interchangeable. The integrated CLI also
+verified this specimen with private input snapshots; wrong source path/ref,
+digest and signer expectations remained failures, not automatically relaxed
+policy. This
+example trusts the pinned official GitHub root-signing repository as an
+out-of-band source; its TUF chain was **not independently validated** in this
+environment (TUF CDN DNS was unavailable). Altering the real bundle signature
+or expected certificate identity failed verification. Unit-test positive
+results that mock Cosign are API contract tests, **not** cryptographic proof.
+
+### Discovery endpoint details
+
 Only official fixed HTTPS API endpoints are queried. npm uses
 [`GET /{package}/{version}`](https://github.com/npm/registry/blob/main/docs/REGISTRY-API.md)
 at `registry.npmjs.org` for `dist.integrity` and, if advertised, its

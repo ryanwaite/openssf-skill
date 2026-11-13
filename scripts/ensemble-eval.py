@@ -46,7 +46,7 @@ from remote_acquisition import acquire_repository, query_package, RemoteAcquisit
 from baseline_conformance import evaluate_conformance, load_evidence as load_baseline
 from supplemental_evidence import (
     artifact_evidence, governance_inputs, read_document, registry_digest_input,
-    reviewed_threat_input, vex_context,
+    registry_verification_input, reviewed_threat_input, vex_context,
 )
 from vulnerability_evidence import triage_osv_package
 from project_governance import governance_evidence, maintenance_evidence
@@ -1238,7 +1238,8 @@ def evaluate(target: str, mode: str, evidence: Optional[Path] = None,
              governance_branch: Optional[str] = None,
              insights_input: Optional[Path] = None,
              fetch_registry: bool = False,
-             registry_digests: Optional[Path] = None) -> Dict[str, Any]:
+             registry_digests: Optional[Path] = None,
+             registry_verification: Optional[Path] = None) -> Dict[str, Any]:
     if fetch_governance and (governance_input or evaluated_at):
         raise ValueError("Live governance cannot be combined with an offline settings input or --at; "
                          "capture live settings now, then replay the snapshot")
@@ -1249,12 +1250,15 @@ def evaluate(target: str, mode: str, evidence: Optional[Path] = None,
                          "capture current evidence, then replay its snapshot")
     if registry_digests and not fetch_registry:
         raise ValueError("--registry-digests requires --registry-evidence")
+    if registry_verification and evaluated_at:
+        raise ValueError("Registry verification cannot be backdated with --at; "
+                         "verify current local inputs, then replay the captured report")
     evaluated_at = evaluated_at or datetime.now(timezone.utc).isoformat()
     _utc(evaluated_at)
     identity = resolve_target(target, ecosystem)
-    if fetch_registry and (identity["kind"] != "package" or
-                           identity.get("ecosystem") not in ("npm", "PyPI")):
-        raise ValueError("--registry-evidence requires an exact-version npm or PyPI package target")
+    if (fetch_registry or registry_verification) and (
+            identity["kind"] != "package" or identity.get("ecosystem") not in ("npm", "PyPI")):
+        raise ValueError("Registry evidence/verification requires an exact-version npm or PyPI package target")
     expected_distributions = registry_digest_input(registry_digests, target) \
         if registry_digests else None
     is_repo = identity["kind"] == "repo"
@@ -1403,7 +1407,10 @@ def evaluate(target: str, mode: str, evidence: Optional[Path] = None,
     registry = discover_registry_evidence(
         identity, allow_fetch=True, expected_digests=expected_distributions
     ) if fetch_registry else None
-    if fetch_registry:
+    verification = registry_verification_input(
+        registry_verification, target, identity, allow_network_trust=allow_network_trust
+    ) if registry_verification else None
+    if fetch_registry or registry_verification:
         evaluated_at = datetime.now(timezone.utc).isoformat()
     for s in signals:
         controls = (("signature", "provenance") if s["name"] == "provenance"
@@ -1429,6 +1436,12 @@ def evaluate(target: str, mode: str, evidence: Optional[Path] = None,
             report["actions"].insert(
                 0, "Review registry identity/digest or attestation metadata conflicts "
                    "before relying on the selected distribution; signatures remain unverified.")
+    if verification is not None:
+        report["registry_verification"] = verification
+        if verification["status"] == "error":
+            report["actions"].insert(
+                0, "Investigate the selected distribution's signature, digest, or independent identity-policy "
+                   "mismatch before relying on its attestation.")
     if project:
         report["project_evidence"] = project
         governance = project.get("governance", {})
@@ -1496,7 +1509,7 @@ def replay(snapshot: Path, evaluated_at: Optional[str] = None) -> Dict[str, Any]
     report["actions"] = data["actions"]
     for name in ("artifact_evidence", "baseline_conformance", "vex_input",
                  "remote_acquisition", "project_evidence", "supply_chain_analysis",
-                 "security_insights", "registry_evidence"):
+                 "security_insights", "registry_evidence", "registry_verification"):
         if name in data:
             if not isinstance(data[name], dict):
                 raise ValueError("Invalid supplemental snapshot evidence")
@@ -1689,6 +1702,36 @@ def to_markdown(report: Dict[str, Any]) -> str:
                          f"{_md(distribution.get('expected_digest_match'))}.")
         lines.append("Registry metadata and publisher/source claims do not establish "
                      "a trusted signature, source correctness, or SLSA level.")
+    if report.get("registry_verification"):
+        verified = report["registry_verification"]
+        lines += ["", "## Registry attestation verification (selected local files)", "",
+                  f"Status {_md(verified['status'])}; "
+                  f"verification {_md(verified['facts']['verification'])}; "
+                  f"scope {_md(verified['facts']['scope'])}.",
+                  " ".join(_md(gap) for gap in verified["gaps"])]
+        for distribution in verified["facts"]["distributions"]:
+            facts = distribution["facts"]
+            lines.append(f"- **{_md(distribution['filename'])}:** {_md(distribution['status'])}; "
+                         f"signature {_md(facts.get('signature', 'not_verified'))}; "
+                         f"signer {_md(facts.get('signer', 'not_verified'))}; "
+                         f"source assertion {_md(facts.get('source_assertion', 'not_verified'))}. "
+                         + " ".join(_md(gap) for gap in distribution["gaps"]))
+            if facts.get("expected_policy"):
+                policy = facts["expected_policy"]
+                verifier = facts.get("verifier", {})
+                lines.append(
+                    f"  Expected digest {_md(policy['expected_digest'])}; "
+                    f"identity {_md(policy['certificate_identity'])}; "
+                    f"issuer {_md(policy['certificate_oidc_issuer'])}; "
+                    f"source {_md(policy['source_repository'])}.")
+                lines.append(f"  Verifier {_md(verifier.get('name', 'unrecorded'))} "
+                             f"{_md(verifier.get('version', 'unrecorded'))}; "
+                             f"captured {_md(verifier.get('captured_at', 'unrecorded'))}; "
+                             f"trust {_md(facts.get('trust', 'unrecorded'))}.")
+                for kind, digest in facts.get("snapshot_sha256", {}).items():
+                    lines.append(f"  Captured {_md(kind)} SHA-256: {_md(digest)}.")
+        lines.append("Discovery metadata remains separately unverified. A valid selected attestation "
+                     "does not confer a security grade or verify other distributions.")
     if report.get("project_evidence"):
         lines += ["", "## Project governance and reviewed scope", ""]
         for name, result in report["project_evidence"].items():
@@ -1794,6 +1837,8 @@ def main():
                     help="explicit public npm/PyPI attestation metadata discovery (not verification)")
     ap.add_argument("--registry-digests", type=Path,
                     help="target-bound independently expected distribution digests for registry discovery")
+    ap.add_argument("--registry-verification", type=Path,
+                    help="optional selected local npm distribution/bundle and independent identity policy")
     ap.add_argument("--snapshot-out", type=Path, help="write sanitized replayable JSON")
     ap.add_argument("--at", help="ISO-8601 evaluation time (UTC offset required)")
     args = ap.parse_args()
@@ -1802,10 +1847,10 @@ def main():
             args.artifact_evidence or args.vex_evidence or args.allow_network_trust or
             args.acquire_remote or args.governance_evidence or args.threat_evidence or
             args.fetch_governance or args.governance_branch or args.security_insights or
-            args.registry_evidence or args.registry_digests):
+            args.registry_evidence or args.registry_digests or args.registry_verification):
         ap.error("--target requires --mode; new evidence/options cannot be used with --replay")
-    if args.allow_network_trust and not args.artifact_evidence:
-        ap.error("--allow-network-trust requires --artifact-evidence")
+    if args.allow_network_trust and not (args.artifact_evidence or args.registry_verification):
+        ap.error("--allow-network-trust requires --artifact-evidence or --registry-verification")
     try:
         report = (replay(args.replay, args.at) if args.replay else
                   evaluate(args.target, args.mode, args.evidence, args.at, args.ecosystem,
@@ -1819,7 +1864,8 @@ def main():
                            governance_branch=args.governance_branch,
                            insights_input=args.security_insights,
                            fetch_registry=args.registry_evidence,
-                           registry_digests=args.registry_digests))
+                           registry_digests=args.registry_digests,
+                           registry_verification=args.registry_verification))
         if args.snapshot_out:
             snapshot = (json.dumps(report, indent=2) + "\n").encode("utf-8")
             if len(snapshot) > MAX_SNAPSHOT_BYTES:
