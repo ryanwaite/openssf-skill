@@ -465,6 +465,84 @@ verification remains separate. Public TUF and OSV DNS remained unavailable on
 the development host; no alternate untrusted endpoint or verification bypass
 was used.
 
+### Optional selected registry verification
+
+`--registry-verification policy.json` is separate from discovery,
+`--registry-digests`, and advisory lookup. No registry request or package
+download is implied by this flag. It requires a local selected npm tarball,
+a supported Sigstore v0.3 DSSE bundle containing SLSA provenance v1, and
+**independently chosen expectations**. Never fill trusted policy from the
+unverified registry response or certificate under examination.
+
+```json
+{
+  "schema_version": 1,
+  "target": "example-package@1.2.3",
+  "distributions": [{
+    "filename": "example-package-1.2.3.tgz",
+    "artifact_path": "example-package-1.2.3.tgz",
+    "bundle_path": "provenance.sigstore.json",
+    "expected_digest": "sha512:<independently expected 128-character digest>",
+    "certificate_identity": "https://github.com/example/project/.github/workflows/release.yml@refs/heads/main",
+    "certificate_oidc_issuer": "https://token.actions.githubusercontent.com",
+    "source_repository": "https://github.com/example/project",
+    "source_ref": "refs/heads/main",
+    "source_path": ".github/workflows/release.yml",
+    "predicate_type": "https://slsa.dev/provenance/v1",
+    "trusted_root_path": "trusted-root.json"
+  }]
+}
+```
+
+Replace every illustrative identity, version, path, digest, and trust value.
+The local artifact basename must match `filename`, and all artifact/bundle/root
+paths must be inside the configuration directory; links and unsafe paths are
+not accepted. The envelope permits 1-12 unique selected filenames, but each
+distribution must be supported independently; verifying one file never verifies
+other files in a release.
+
+The optional installed verifier is Cosign 3.1.4's
+`verify-blob-attestation`. It must check the DSSE signature, certificate chain,
+exact identity/issuer, transparency evidence, and local digest claim without
+insecure bypass flags. The skill additionally checks exact package/version,
+predicate and source assertions. `source_ref`, `source_path`, and `builder_id`
+are optional tighter expected signed-assertion constraints, not evidence that
+the whole build meets a SLSA level.
+
+The safe snapshot path currently requires POSIX file APIs. It reads bounded
+regular-file inputs into a private system-temporary directory and verifies
+those exact captured bytes, not a second mutable read of the original bundle.
+Changed original or captured files prevent an affirmative result; temporary
+files and verifier cache are removed afterward. Output records expected policy,
+captured input SHA-256 fingerprints, actual capture time, and an explicitly
+unrecorded verifier version when it was not measured. These fingerprints
+identify the verified snapshot, not an assurance that the original file can
+never change after the call returns.
+
+A local root is an explicit caller trust input, not automatically trusted
+because it is valid JSON. Without one, the default is unknown; adding
+`--allow-network-trust` explicitly allows public Sigstore trust lookup. Public
+trust availability and a cryptographic rejection are not a successful check.
+Do not use an untrusted alternate endpoint to evade DNS or trust failures.
+
+Outputs are separated under `registry_verification`. Individual results retain
+signature, signer and source-assertion verification facts; aggregate success
+covers only the selected local files. The existing `registry_evidence` discovery
+section remains `not_verified`. Neither outcome changes risk weights, removes
+vulnerability findings, establishes source correctness, or grants Baseline/SLSA
+conformance. Rejections produce prioritized review actions; missing tools or
+unsupported formats remain gaps. Ordinary advice needs none of these inputs.
+
+Current PyPI PEP 740 envelopes are explicitly unsupported by this Cosign-only
+verification path and return unknown. They must not be relabeled as Sigstore
+bundles or promoted from discovery to verified. A separate PEP 740-aware
+verification integration remains future work.
+
+Verification records the current input observation; `--at` is rejected for a
+new verification run. Snapshots retain the original result, policy and evidence
+identities; replay does not rerun crypto, reopen local inputs, or reestablish
+their present trustworthiness.
+
 ### Step 3 — Fuse signals into a weighted verdict
 Apply **`ensemble/risk-model.md`** exactly:
 1. Normalize each signal to a 0–100 sub-score.

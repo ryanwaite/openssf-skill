@@ -19,6 +19,7 @@ ASSETS = (
     'ensemble/risk-model.md',
     'scripts/sbom_analysis.py', 'scripts/spdx_validation.py',
     'scripts/security_insights.py', 'scripts/registry_evidence.py',
+    'scripts/registry_verification.py',
     'references/sbom/spdx-2.3.schema.json',
     'references/security-insights/schema-v2.2.0.cue',
 )

@@ -194,6 +194,7 @@ verdict. The suite does **not** need to run to produce one useful advisor action
 | Local SBOM generation and dependency context | Optional Syft generation on existing local artifacts/source; optional official SPDX 2.3 schema validation; exact advisory-to-inventory paths, not a second risk score | No |
 | Security Insights | Explicit `--security-insights` local file/directory; released-schema checks and bounded maintainer self-report, not verified controls | No |
 | npm/PyPI attestation metadata | Explicit `--registry-evidence` on an exact package version; distribution digests and attestation discovery, **not** cryptographic verification | No |
+| Selected npm attestation verification | Separate `--registry-verification` with local tarball/bundle and independent digest/signer/source policy; optional Cosign; does not verify PyPI or award a SLSA level | No |
 | Baseline conformance | Optional `--baseline-evidence`; canonical versioned L1-L3 IDs and manual applicability, separate from numeric risk | No |
 | Malicious-package/reachability/VEX context | Package-scoped advisory facts and optional `--vex-evidence`; no blind suppression or inferred issuer authentication | No |
 | Effective forge controls and activity | Optional read-only `--fetch-governance` or imported `--governance-evidence`; exact-branch rules, bypass/permission gaps, stable release and support context | No |
@@ -278,6 +279,38 @@ See the [inventory/metadata input guide](skills/audit/SKILL.md#optional-inventor
 for complete examples and dependency choices. Existing vulnerability findings
 may be correlated with declared inventory paths, but they are not rescored or
 suppressed, and missing matches never establish safety.
+
+### Verify one selected registry attestation
+
+Discovery remains unverified even when a separate selected-file check succeeds.
+Use `--registry-verification policy.json` only when you already hold the exact
+npm tarball and its supported SLSA v1 Sigstore bundle, together with independently
+established digest, certificate identity, issuer, and source expectations:
+
+```bash
+python3 <installed-skill>/scripts/ensemble-eval.py \
+  --target example-package@1.2.3 --ecosystem npm --mode consume \
+  --registry-verification policy.json
+```
+
+The [verification input guide](skills/audit/SKILL.md#optional-selected-registry-verification)
+documents the policy JSON. Input files must be inside its directory. No package
+is downloaded, installed, or executed. Optional Cosign verifies the selected
+bundle; the result does not authenticate other distribution files, prove source
+correctness, establish a SLSA level, or change the numeric risk score.
+
+A supplied trusted-root file must be independently trusted. Without one,
+verification stays unknown unless `--allow-network-trust` explicitly permits
+public Sigstore trust lookup. Missing tools/trust remain targeted gaps, not
+barriers to basic advice. The current supported flow is **npm SLSA v1 / Sigstore
+v0.3 bundles only**; PyPI PEP 740 is still discovery-only here. Live verification
+cannot be backdated with `--at`; replay the captured report instead.
+
+Inventory correlation now handles actual Syft Maven display names and PyPI
+canonical names while preserving exact ecosystem/version identity. Conflicting
+or qualified/subpath purls remain unresolved rather than being guessed.
+SPDX 3.0 output is not supported by this reader or the tested OSV 2.7.1 path:
+regenerate SPDX 2.3 instead of relabeling the document.
 
 Custom risk **policy v2** removes Baseline from numeric scoring and renormalizes
 the other weights without changing their relative importance. Previous

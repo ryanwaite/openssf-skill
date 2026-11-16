@@ -14,7 +14,7 @@ A Software Bill of Materials (SBOM) is a machine-readable inventory of all compo
 - **Best for**: Security, vulnerability tracking, lightweight automation
 - **Formats**: JSON, XML
 
-**Recommendation**: This skill standardizes on **SPDX JSON 2.3** as its default for generation and distribution. Syft **v1.57.1** also supports SPDX JSON 2.2 and 3.0, but 3.0 is opt-in: verify your validator and downstream consumer before changing versions. CycloneDX remains an optional secondary format for consumers such as Dependency-Track. Signing is a separate release decision; an unsigned SBOM can still be useful.
+**Recommendation**: This skill standardizes on **SPDX JSON 2.3** as its default for generation and distribution. Syft **v1.57.1** also supports SPDX JSON 2.2 and 3.0, but the local inventory reader accepts **2.3 only**; 3.0 is not a switch for the existing graph workflow. Verify your validator and downstream consumer before changing versions. CycloneDX remains an optional secondary format for consumers such as Dependency-Track. Signing is a separate release decision; an unsigned SBOM can still be useful.
 
 **Start now**: Choose one scope (source checkout, installed/build artifact, or runtime image), generate its SBOM, and label that scope. A source SBOM is **not** evidence of what a released binary contains. For a release, build the asset, inventory the actual file or immutable image digest, and record the matching artifact digest alongside its SBOM. You do not need to activate every scanner, registry, or signing tool to start.
 
@@ -68,9 +68,49 @@ provided under [CC BY 3.0](SPDX-SCHEMA-LICENSE). No schema is fetched at runtime
 Schema acceptance checks the published structural rules, **not** all semantic
 consistency, inventory truth, completeness, or downstream tool compatibility.
 
+**Checked interoperability (Syft v1.57.1 / OSV-Scanner v2.7.1 / jsonschema
+v4.25.1):** Offline synthetic source directories containing npm lockfile,
+Python requirements, Go module, and Maven POM produced SPDX JSON 2.3 that
+the bundled official 2.3 schema validator accepted and the local reader
+ingested. Syft emitted encoded scoped npm purls, canonicalized PyPI names
+(`foo_bar` → `foo-bar`), slash-containing Go module purls, and Maven purls
+with `group/artifact` while its package display name was just `artifact`.
+OSV-Scanner extracted the matching npm, PyPI, Go, and Maven package identities
+from these 2.3 documents with `scan source -L <file> --offline
+--offline-vulnerabilities --all-packages --format json`. Only the cached
+**synthetic** PyPI vulnerability database allowed the scanner to complete
+vulnerability matching (it reported a synthetic advisory and exited 1).
+Without local npm/Go/Maven databases the offline scanner extracted packages
+but exited 127; this is **not** a clean vulnerability scan or a claim about
+current vulnerabilities. A separately built local wheel and JAR, scanned as
+individual files, produced schema-valid SPDX 2.3 containing only the file
+root, with no identified third-party packages; do not infer completeness
+from a valid document.
+
+The local graph correlates a finding only when its ecosystem, exact version,
+and unique unqualified purl identify the same component. npm (including
+encoded scopes), Go, and crates.io names remain exact; PyPI uses its
+case-insensitive `[-_.]+` name normalization; Maven requires the finding's
+`group:artifact` to equal the purl's `group/artifact`, allowing Syft's
+artifact-only display name. Multiple unequal purls, qualifiers, subpaths,
+missing versions, and conflicting display names stay unmatched rather than
+being guessed. Only relationships between locally declared SPDX elements
+are accepted; a relationship pointing to an external-document element is
+rejected, not fetched or silently used to infer paths.
+
+Syft's `spdx-json@3.0` output uses SPDX 3.0.1 JSON-LD `@graph`, not the
+SPDX 2.3 `spdxVersion` / `packages` document shape. The local reader rejects
+it, and OSV-Scanner v2.7.1's SPDX extractor rejected the tested 3.0 output
+(`JSON document does not contain spdxVersion field`). If a downstream
+consumer requires SPDX 3.0, validate it independently with a compatible 3.0
+validator and consumer; **rerun Syft with `spdx-json@2.3`** for this skill's
+local graph and OSV-Scanner v2.7.1 instead of relabeling or silently
+converting the 3.0 document. Schema acceptance alone does not establish
+consumer compatibility.
+
 Advisory graph paths describe declared package relationships, not runtime/code
 reachability or exploitability. Existing normalized advisories are matched
-only by precise namespace/name/version and package URL, not rescanned or
+only by precise ecosystem/name/version and package URL, not rescanned or
 deducted again. Containment is distinct from dependency edges; cycles and
 disconnected/ambiguous components remain visible. Graph expansion is bounded
 to 10,000 routes/results and 128 nodes per path. Output is contextual

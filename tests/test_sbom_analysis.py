@@ -291,6 +291,81 @@ class SBOMAnalysisTests(unittest.TestCase):
                          {"GHSA-wrong-eco", "GHSA-wrong-version"})
         self.assertIn("ambiguous", " ".join(result["gaps"]))
 
+    def test_pinned_syft_ecosystem_identities_match_normalized_osv_names(self):
+        doc = self.document()
+        observed = [
+            ("scoped", "@example/scoped-package", "1.2.3",
+             "pkg:npm/%40example/scoped-package@1.2.3", "npm",
+             "@example/scoped-package"),
+            ("python", "foo-bar", "1.0", "pkg:pypi/foo-bar@1.0",
+             "PyPI", "Foo_Bar"),
+            ("go", "github.com/google/uuid", "v1.6.0",
+             "pkg:golang/github.com/google/uuid@v1.6.0", "Go",
+             "github.com/google/uuid"),
+            ("maven", "guava", "31.1-jre",
+             "pkg:maven/com.google.guava/guava@31.1-jre", "Maven",
+             "com.google.guava:guava"),
+        ]
+        findings = []
+        for component, display, version, purl, ecosystem, identity in observed:
+            doc["packages"].append({
+                "SPDXID": "SPDXRef-" + component, "name": display, "versionInfo": version,
+                "externalRefs": [{"referenceCategory": "PACKAGE-MANAGER",
+                                  "referenceType": "purl", "referenceLocator": purl}]})
+            doc["relationships"].append({
+                "spdxElementId": "SPDXRef-app", "relatedSpdxElement": "SPDXRef-" + component,
+                "relationshipType": "CONTAINS"})
+            findings.append(self.finding(identity, version, "GHSA-" + component, ecosystem))
+        result = sb.correlate_sbom(self.inventory(doc), self.known(findings))
+        self.assertEqual(result["status"], "partial")
+        self.assertEqual({m["advisory_id"]: (m["spdx_id"], m["relation"])
+                          for m in result["facts"]["matched"]},
+                         {"GHSA-" + item[0]: ("SPDXRef-" + item[0], "contained")
+                          for item in observed})
+        self.assertEqual(result["facts"]["unmatched_advisory_ids"], [])
+        findings[1]["package"] = "foo.bar"
+        dotted = sb.correlate_sbom(self.inventory(doc), self.known(findings))
+        self.assertIn("GHSA-python", [m["advisory_id"] for m in dotted["facts"]["matched"]])
+
+    def test_purl_conflicts_qualifiers_and_unrelated_display_names_do_not_match(self):
+        cases = [
+            ("pkg:maven/other.group/guava@31.1-jre", "guava", "Maven",
+             "com.google.guava:guava"),
+            ("pkg:maven/com.google.guava/guava@31.1-jre", "other", "Maven",
+             "com.google.guava:guava"),
+            ("pkg:npm/lodash@4.17.21?repository_url=example.org", "lodash",
+             "npm", "lodash"),
+            ("pkg:npm/lodash@4.17.21#lib", "lodash", "npm", "lodash"),
+            ("pkg:golang/github.com/google/uuid@v1.6.0", "google/uuid", "Go",
+             "github.com/google/uuid"),
+            ("pkg:pypi/foo-bar@1.0", "other-bar", "PyPI", "foo_bar"),
+            ("pkg:pypi/foo-bar@1.0", "foo-bar", "npm", "foo-bar"),
+        ]
+        for purl, display, ecosystem, identity in cases:
+            with self.subTest(purl=purl, display=display, ecosystem=ecosystem):
+                version = "31.1-jre" if ecosystem == "Maven" else \
+                    "v1.6.0" if ecosystem == "Go" else \
+                    "1.0" if ecosystem == "PyPI" else "4.17.21"
+                doc = self.document()
+                doc["packages"][1].update(
+                    {"name": display, "versionInfo": version,
+                     "externalRefs": [{"referenceType": "purl",
+                                       "referenceLocator": purl}]})
+                finding = self.finding(identity, version, "GHSA-unrelated", ecosystem)
+                result = sb.correlate_sbom(self.inventory(doc), self.known([finding]))
+                self.assertEqual(result["facts"]["matched"], [])
+        doc = self.document()
+        doc["packages"][1]["externalRefs"].append(
+            {"referenceType": "purl", "referenceLocator": "pkg:npm/other@2.0"})
+        result = sb.correlate_sbom(self.inventory(doc),
+                                   self.known([self.finding("pkg", "2.0", "GHSA-ambiguous")]))
+        self.assertEqual(result["facts"]["matched"], [])
+        self.assertIn("Multiple unequal", " ".join(result["gaps"]))
+        doc["packages"][1]["externalRefs"][-1]["referenceLocator"] = "pkg:npm/pkg@2.0"
+        result = sb.correlate_sbom(self.inventory(doc),
+                                   self.known([self.finding("pkg", "2.0", "GHSA-duplicate")]))
+        self.assertEqual(len(result["facts"]["matched"]), 1)
+
     def test_missing_purl_or_version_never_infers_package_match(self):
         doc = self.document()
         doc["packages"][1].pop("externalRefs")
@@ -312,6 +387,21 @@ class SBOMAnalysisTests(unittest.TestCase):
         doc["spdxVersion"] = "SPDX-3.0"
         self.assertEqual(sb.correlate_sbom(self.inventory(doc),
                                            self.known([]))["status"], "unknown")
+        spdx3 = {
+            "@context": "https://spdx.org/rdf/3.0.1/spdx-context.jsonld",
+            "@graph": [
+                {"type": "CreationInfo", "specVersion": "3.0.1",
+                 "@id": "_:CreationInfo-1"},
+                {"type": "SpdxDocument", "spdxId": "SPDXRef:Document-1"},
+                {"type": "software_Package", "name": "pkg",
+                 "spdxId": "SPDXRef:Package-npm-pkg"},
+            ],
+        }
+        unsupported = self.inventory(spdx3)
+        self.assertEqual(unsupported["status"], "error")
+        self.assertIn("Only SPDX JSON 2.3", unsupported["gaps"][0])
+        self.assertEqual(sb.correlate_sbom(unsupported, self.known([]))["status"], "unknown")
+        self.assertEqual(self.inventory()["facts"]["packages"][1]["name"], "pkg")
 
     def test_graph_budget_cannot_expand_into_unbounded_report(self):
         with patch.object(sb, "_MAX_ROUTES", 1):
